@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Dark background fill -->
+    <path
+        android:pathData="M0,0 L108,0 L108,108 L0,108 Z"
+        android:fillColor="#0D1120"/>
+
+    <!-- Outer silver ring -->
+    <path
+        android:pathData="M54,8 a46,46 0 1,0 0.001,0 Z
+                          M54,20 a34,34 0 1,1 -0.001,0 Z"
+        android:fillColor="#CBD5E1"
+        android:fillType="evenOdd"/>
+
+    <!-- Mid gray ring (depth) -->
+    <path
+        android:pathData="M54,20 a34,34 0 1,0 0.001,0 Z
+                          M54,23 a31,31 0 1,1 -0.001,0 Z"
+        android:fillColor="#64748B"
+        android:fillType="evenOdd"/>
+
+    <!-- Dark inner circle -->
+    <path
+        android:pathData="M54,23 a31,31 0 1,0 0.001,0 Z"
+        android:fillColor="#0B0F1C"/>
+
+    <!-- White play triangle (slightly right-offset) -->
+    <path
+        android:pathData="M45,37 L72,54 L45,71 Z"
+        android:fillColor="#FFFFFF"/>
+
+</vector>
