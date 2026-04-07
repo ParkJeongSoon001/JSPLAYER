@@ -23,5 +23,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "JSPLAYER"
+rootProject.name = "SVPLAYER"
 include(":app")

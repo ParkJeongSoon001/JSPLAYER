@@ -18,6 +18,11 @@ import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Sort
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -42,6 +47,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import kotlinx.coroutines.delay
 import android.Manifest
 import android.content.pm.PackageManager
@@ -54,6 +61,7 @@ import kotlinx.coroutines.launch
 import org.jupnp.support.model.DIDLObject
 import org.jupnp.support.model.container.Container
 import org.jupnp.support.model.item.Item
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onKeyEvent
@@ -76,6 +84,11 @@ import android.content.IntentFilter
 import android.graphics.drawable.Icon
 import android.os.Build
 import android.util.Rational
+import android.provider.Settings
+import android.net.Uri
+import android.content.Intent
+import android.app.AppOpsManager
+import android.content.Context
 
 sealed class ScreenState {
     object Home : ScreenState()
@@ -90,6 +103,7 @@ sealed class ScreenState {
     // ── SMB / WebDAV ──────────────────────────────────────────────
     data class SmbServerList(val dummy: Unit = Unit) : ScreenState()
     data class WebDavServerList(val dummy: Unit = Unit) : ScreenState()
+    data class FtpSftpServerList(val dummy: Unit = Unit) : ScreenState()
     data class NetworkBrowsing(
         val credentials: ServerCredentials,
         val currentPath: String,
@@ -104,6 +118,11 @@ sealed class ScreenState {
         val playlist: List<PlaylistItem> = emptyList(),
         val currentIndex: Int = -1
     ) : ScreenState()
+}
+
+enum class LocalViewMode {
+    ALL_VIDEOS,
+    FOLDERS
 }
 
 data class NavHistoryItem(val containerId: String, val containerName: String)
@@ -150,6 +169,23 @@ class MainActivity : ComponentActivity() {
 
     // 외부 앱에서 동영상 파일 열기(ACTION_VIEW)로 전달된 URI
     private val pendingVideoUri = mutableStateOf<android.net.Uri?>(null)
+
+    private val codecInstallResultMessage = mutableStateOf<String?>(null)
+    private val codecZipPickerLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: android.net.Uri? ->
+        uri?.let {
+            lifecycleScope.launch {
+                val result = CodecZipInstaller.installFromZip(this@MainActivity, it)
+                if (result.success) {
+                    // 설치 성공 직후 다시 로딩 시도 (현재 세션에서 사용 가능하도록)
+                    val loaded = FfmpegLoader.initialize(this@MainActivity)
+                    codecInstallResultMessage.value = "설치 성공: 고덱이 성공적으로 설치 및 로드되었습니다." + 
+                        if (loaded) "\n(즉시 적용됨)" else "\n(적용을 위해 앱 재시작을 권장합니다)"
+                } else {
+                    codecInstallResultMessage.value = "설치 실패: ${result.message}"
+                }
+            }
+        }
+    }
 
     /**
      * ACTION_VIEW intent에서 동영상 URI를 추출하여 pendingVideoUri에 저장.
@@ -232,6 +268,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // 추가 코덱 동적 로딩 초기화 (Media3 구성 요소 로드 전 최우선 실행)
+        FfmpegLoader.initialize(this)
+        
         super.onCreate(savedInstanceState)
 
         // [경로 C] OnBackPressedCallback: 스마트폰 제스처 뒤로가기 (API 33+ 필수!)
@@ -243,11 +282,13 @@ class MainActivity : ComponentActivity() {
             }
         })
 
+
+
         // 외부 앱에서 동영상 열기 intent 처리
         handleIncomingIntent(intent)
         
-        // 추가 코덱 동적 로딩 초기화
-        FfmpegLoader.initialize(this)
+        // (원래 위치인 여기에도 남겨두거나 위로 완전히 옮겼으므로 삭제 가능하지만, 안전을 위해 중복 호출도 무방함)
+        // FfmpegLoader.initialize(this) 
 
         // PIP 브로드캐스트 리시버 등록
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -286,6 +327,16 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             JSPLAYERTheme {
+                var showForegroundServicePermissionDialog by remember { mutableStateOf(false) }
+                var showPipPermissionDialog by remember { mutableStateOf(false) }
+
+                LaunchedEffect(Unit) {
+                    if (!checkForegroundServicePermissions()) {
+                        showForegroundServicePermissionDialog = true
+                    } else if (!isPipPermissionGranted()) {
+                        showPipPermissionDialog = true
+                    }
+                }
                 var screenState by remember { mutableStateOf<ScreenState>(ScreenState.Home) }
                 val navStack = remember { mutableStateListOf<NavHistoryItem>() }
                 var browseItems by remember { mutableStateOf<List<DIDLObject>>(emptyList()) }
@@ -295,6 +346,10 @@ class MainActivity : ComponentActivity() {
                 var showExitDialog by remember { mutableStateOf(false) }
                 var browsingDeviceOverride: Device<*, *, *>? by remember { mutableStateOf(null) }
                 var localBrowsingActiveMode: Boolean by remember { mutableStateOf(false) }
+                var localSortOrder by remember { mutableStateOf(SortOrder.NAME_ASC) }
+                var networkSortOrder by remember { mutableStateOf(SettingsStore.getSortOrder(this@MainActivity)) }
+                var localViewMode by remember { mutableStateOf(LocalViewMode.ALL_VIDEOS) }
+                var localSelectedFolder by remember { mutableStateOf<String?>(null) }
                 var isSearchingServers by remember { mutableStateOf(false) }
                 val lastFocusedIndexMap = remember { mutableStateMapOf<String, Int>() }
                 // 외부 앱에서 동영상을 열었는지 추적 (뒤로가기 시 Home으로 복귀)
@@ -516,6 +571,9 @@ class MainActivity : ComponentActivity() {
                         is ScreenState.WebDavServerList -> {
                             screenState = ScreenState.Home
                         }
+                        is ScreenState.FtpSftpServerList -> {
+                            screenState = ScreenState.Home
+                        }
                         is ScreenState.NetworkBrowsing -> {
                             val cur = screenState as ScreenState.NetworkBrowsing
                             if (networkNavStack.isNotEmpty()) {
@@ -524,10 +582,18 @@ class MainActivity : ComponentActivity() {
                                     val prev = networkNavStack.last()
                                     screenState = ScreenState.NetworkBrowsing(cur.credentials, prev.first, prev.second)
                                 } else {
-                                    screenState = if (cur.credentials.type == "SMB") ScreenState.SmbServerList() else ScreenState.WebDavServerList()
+                                    screenState = when (cur.credentials.type) {
+                                        "SMB" -> ScreenState.SmbServerList()
+                                        "FTP", "SFTP" -> ScreenState.FtpSftpServerList()
+                                        else -> ScreenState.WebDavServerList()
+                                    }
                                 }
                             } else {
-                                screenState = if (cur.credentials.type == "SMB") ScreenState.SmbServerList() else ScreenState.WebDavServerList()
+                                screenState = when (cur.credentials.type) {
+                                    "SMB" -> ScreenState.SmbServerList()
+                                    "FTP", "SFTP" -> ScreenState.FtpSftpServerList()
+                                    else -> ScreenState.WebDavServerList()
+                                }
                             }
                         }
                     }
@@ -552,6 +618,9 @@ class MainActivity : ComponentActivity() {
                             screenState = ScreenState.Home
                         }
                         is ScreenState.WebDavServerList -> {
+                            screenState = ScreenState.Home
+                        }
+                        is ScreenState.FtpSftpServerList -> {
                             screenState = ScreenState.Home
                         }
                         is ScreenState.NetworkBrowsing -> {
@@ -589,7 +658,11 @@ class MainActivity : ComponentActivity() {
                             goBack()
                         }
                         is ScreenState.LocalBrowsing -> {
-                            screenState = ScreenState.Home
+                            if (localSelectedFolder != null) {
+                                localSelectedFolder = null
+                            } else {
+                                screenState = ScreenState.Home
+                            }
                         }
                     }
                 }
@@ -674,6 +747,64 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                if (showForegroundServicePermissionDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showForegroundServicePermissionDialog = false },
+                        title = { Text("백그라운드 재생 권한 안내") },
+                        text = { Text("영상을 백그라운드에서 끊김 없이 재생하려면 포그라운드 서비스 권한이 필요합니다. 설정 화면에서 권한을 확인해 주세요.") },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                showForegroundServicePermissionDialog = false
+                                try {
+                                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                        data = Uri.fromParts("package", packageName, null)
+                                    }
+                                    startActivity(intent)
+                                } catch (e: Exception) {
+                                    android.widget.Toast.makeText(context, "설정 화면을 열 수 없습니다.", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }) {
+                                Text("설정으로 이동")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showForegroundServicePermissionDialog = false }) {
+                                Text("나중에")
+                            }
+                        }
+                    )
+                }
+
+                if (showPipPermissionDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showPipPermissionDialog = false },
+                        title = { Text("PIP(사진 속 사진) 권한 안내") },
+                        text = { Text("다른 앱을 사용하는 중에도 영상을 작게 띄워 계속 시청할 수 있습니다. 이 기능을 사용하려면 '사진 속 사진' 권한 허용이 필요합니다.") },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                showPipPermissionDialog = false
+                                try {
+                                    val intent = Intent("android.settings.PICTURE_IN_PICTURE_SETTINGS", Uri.parse("package:$packageName"))
+                                    startActivity(intent)
+                                } catch (e: Exception) {
+                                    try {
+                                        startActivity(Intent("android.settings.PICTURE_IN_PICTURE_SETTINGS"))
+                                    } catch (e2: Exception) {
+                                        android.widget.Toast.makeText(context, "PIP 설정 화면을 열 수 없습니다.", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }) {
+                                Text("설정으로 이동")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showPipPermissionDialog = false }) {
+                                Text("나중에")
+                            }
+                        }
+                    )
+                }
+
                 Scaffold(
                     modifier = Modifier.fillMaxSize()
                 ) { innerPadding ->
@@ -713,8 +844,15 @@ class MainActivity : ComponentActivity() {
                                     networkBrowsingCredentials = null
                                     screenState = ScreenState.WebDavServerList()
                                 },
+                                onFtpSftpClick = {
+                                    networkNavStack.clear()
+                                    networkBrowsingCredentials = null
+                                    screenState = ScreenState.FtpSftpServerList()
+                                },
                                 onLicenseClick = { screenState = ScreenState.LicensePolicy },
-                                isTvMode = isTvMode
+                                isTvMode = isTvMode,
+                                onZipClick = { codecZipPickerLauncher.launch("application/zip") },
+                                codecInstallResultMessage = codecInstallResultMessage.value
                             )
                         }
                         is ScreenState.LicensePolicy -> {
@@ -765,6 +903,8 @@ class MainActivity : ComponentActivity() {
                                 isLoading = isLoading,
                                 errorMessage = errorMessage,
                                 isTvMode = isTvMode,
+                                sortOrder = networkSortOrder,
+                                onSortOrderChange = { networkSortOrder = it },
                                 initialSelectedIndex = lastFocusedIndexMap[state.currentContainerId] ?: 0,
                                 onBackClick = { triggerBack() },
                                 onItemClick = { item, index ->
@@ -1082,6 +1222,12 @@ class MainActivity : ComponentActivity() {
                                 padding = innerPadding,
                                 isTvMode = isTvMode,
                                 initialSelectedIndex = lastFocusedIndexMap["LocalBrowsing"] ?: 0,
+                                sortOrder = localSortOrder,
+                                onSortOrderChange = { localSortOrder = it },
+                                viewMode = localViewMode,
+                                onViewModeChange = { localViewMode = it },
+                                selectedFolder = localSelectedFolder,
+                                onSelectedFolderChange = { localSelectedFolder = it },
                                 onBackClick = { triggerBack() },
                                 onItemClick = { videoItem, index, allVideos ->
                                     // Save index
@@ -1248,6 +1394,23 @@ class MainActivity : ComponentActivity() {
                                 }
                             )
                         }
+                        is ScreenState.FtpSftpServerList -> {
+                            networkBrowsingCredentials = null
+                            localBrowsingActiveMode = false
+                            browsingDeviceOverride = null
+                            NetworkServerListScreen(
+                                serverType = "FTP_SFTP",
+                                isTvMode = isTvMode,
+                                onBackClick = { triggerBack() },
+                                onConnect = { creds ->
+                                    networkBrowsingCredentials = creds
+                                    val rootPath = if (creds.type == "SFTP") "." else "/"
+                                    networkNavStack.clear()
+                                    networkNavStack.add(Pair(rootPath, creds.displayName.ifBlank { creds.host }))
+                                    screenState = ScreenState.NetworkBrowsing(creds, rootPath, creds.displayName.ifBlank { creds.host })
+                                }
+                            )
+                        }
                         is ScreenState.NetworkBrowsing -> {
                             browsingDeviceOverride = null
                             localBrowsingActiveMode = false
@@ -1256,6 +1419,8 @@ class MainActivity : ComponentActivity() {
                                 currentPath = state.currentPath,
                                 currentPathName = state.currentPathName,
                                 isTvMode = isTvMode,
+                                sortOrder = networkSortOrder,
+                                onSortOrderChange = { networkSortOrder = it },
                                 onBackClick = { triggerBack() },
                                 onFolderClick = { path, name ->
                                     networkNavStack.add(Pair(path, name))
@@ -1354,6 +1519,33 @@ class MainActivity : ComponentActivity() {
             try { unregisterReceiver(pipBroadcastReceiver) } catch (_: Exception) {}
         }
         super.onDestroy()
+    }
+
+    private fun checkForegroundServicePermissions(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) { // Android 9+
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.FOREGROUND_SERVICE) != PackageManager.PERMISSION_GRANTED) {
+                return false
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { // Android 14+
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK) != PackageManager.PERMISSION_GRANTED) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun isPipPermissionGranted(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
+        
+        val appOps = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        val status = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            appOps.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_PICTURE_IN_PICTURE, android.os.Process.myUid(), packageName)
+        } else {
+            @Suppress("DEPRECATION")
+            appOps.checkOpNoThrow(AppOpsManager.OPSTR_PICTURE_IN_PICTURE, android.os.Process.myUid(), packageName)
+        }
+        return status == AppOpsManager.MODE_ALLOWED
     }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: android.content.res.Configuration) {
@@ -1649,10 +1841,46 @@ fun BrowseScreen(
     isLoading: Boolean,
     errorMessage: String?,
     isTvMode: Boolean = false,
+    sortOrder: SortOrder,
+    onSortOrderChange: (SortOrder) -> Unit,
     initialSelectedIndex: Int = 0,
     onBackClick: () -> Unit,
     onItemClick: (DIDLObject, Int) -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var sortMenuExpanded by remember { mutableStateOf(false) }
+
+    val sortedItems = remember(items, sortOrder) {
+        items.sortedWith { o1, o2 ->
+            val isDir1 = o1 is Container
+            val isDir2 = o2 is Container
+
+            if (isDir1 && !isDir2) -1
+            else if (!isDir1 && isDir2) 1
+            else {
+                val name1 = o1.title ?: ""
+                val name2 = o2.title ?: ""
+                
+                // jUPnP DIDLObject date extraction
+                fun getDate(obj: DIDLObject): String {
+                    return try {
+                        obj.properties.find { it.descriptorName == "dc:date" }?.value?.toString() ?: ""
+                    } catch (e: Exception) { "" }
+                }
+                
+                val date1 = getDate(o1)
+                val date2 = getDate(o2)
+
+                when (sortOrder) {
+                    SortOrder.NAME_ASC -> name1.compareTo(name2, ignoreCase = true)
+                    SortOrder.NAME_DESC -> name2.compareTo(name1, ignoreCase = true)
+                    SortOrder.DATE_DESC -> date2.compareTo(date1) // String comparison for ISO dates usually works
+                    SortOrder.DATE_ASC -> date1.compareTo(date2)
+                }
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1661,11 +1889,20 @@ fun BrowseScreen(
     ) {
         TopAppBar(
             title = { 
-                Text(
-                    text = state.containerName,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
-                ) 
+                Column {
+                    Text(
+                        text = state.containerName,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = sortOrder.displayName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
             },
             navigationIcon = {
                 IconButton(onClick = onBackClick) {
@@ -1673,6 +1910,32 @@ fun BrowseScreen(
                 }
             },
             actions = {
+                // 정렬 메뉴 추가
+                Box {
+                    IconButton(onClick = { sortMenuExpanded = true }) {
+                        Icon(Icons.Default.Sort, contentDescription = "Sort", tint = MaterialTheme.colorScheme.onBackground)
+                    }
+                    DropdownMenu(
+                        expanded = sortMenuExpanded,
+                        onDismissRequest = { sortMenuExpanded = false }
+                    ) {
+                        SortOrder.values().forEach { order ->
+                            DropdownMenuItem(
+                                text = { Text(order.displayName) },
+                                onClick = {
+                                    onSortOrderChange(order)
+                                    SettingsStore.saveSortOrder(context, order)
+                                    sortMenuExpanded = false
+                                },
+                                leadingIcon = {
+                                    if (sortOrder == order) {
+                                        Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
                 ExitAppButton()
             },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
@@ -1707,7 +1970,7 @@ fun BrowseScreen(
                 contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                itemsIndexed(items) { index, item ->
+                itemsIndexed(sortedItems) { index, item ->
                     val isFolder = item is Container
                     val iconVector = if (isFolder) Icons.Default.List else Icons.Default.PlayArrow
                     val iconTint = if (isFolder) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
@@ -1896,11 +2159,54 @@ fun VideoPlayerScreen(
     var isPlaying by remember { mutableStateOf(true) }
     var currentSpeed by remember { mutableFloatStateOf(1.0f) }
     var hideTimerKey by remember { mutableIntStateOf(0) }
+    var isOrientationLocked by remember { mutableStateOf(true) }
+    var videoSizeState by remember { mutableStateOf<androidx.media3.common.VideoSize?>(null) }
+    
+    // orientation 로직을 별도로 분리하여 상태 변화 시 즉각 적용되도록 함
+    LaunchedEffect(isOrientationLocked, videoSizeState) {
+        val activity = context as? android.app.Activity ?: return@LaunchedEffect
+        val videoSize = videoSizeState
+        if (!isOrientationLocked) {
+            // 해제 모드: 센서에 따라 자유롭게 회전 (상하좌우 모두)
+            activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+        } else if (videoSize != null) {
+            // 잠금 모드: 영상 비율에 따라 자동 고정
+            val isRotated = videoSize.unappliedRotationDegrees % 180 != 0
+            val actualWidth = if (isRotated) videoSize.height else videoSize.width
+            val actualHeight = if (isRotated) videoSize.width else videoSize.height
+            
+            if (actualWidth > 0 && actualHeight > 0) {
+                val isVertical = actualHeight > actualWidth
+                if (isVertical) {
+                    // 세로 동영상: 세로로 고정 또는 센서 기반 세로 회전
+                    activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR
+                } else {
+                    // 가로 동영상: 항상 가로 고정
+                    activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                }
+            }
+        }
+    }
     
     // For Slider Interaction
     var isDragging by remember { mutableStateOf(false) }
     var dragPosition by remember { mutableLongStateOf(0L) }
     
+    // For Screen Gestures (Double tap, Drag)
+    var isDraggingScreen by remember { mutableStateOf(false) }
+    var screenDragPosition by remember { mutableLongStateOf(-1L) }
+    var seekIndicatorText by remember { mutableStateOf("") }
+    var showSeekIndicator by remember { mutableStateOf(false) }
+
+    LaunchedEffect(showSeekIndicator, isDraggingScreen) {
+        if (showSeekIndicator && !isDraggingScreen) {
+            delay(800L)
+            showSeekIndicator = false
+        }
+    }
+    
+    val currentIsControlVisible by androidx.compose.runtime.rememberUpdatedState(isControlVisible)
+
     val speeds = remember { listOf(0.5f, 1.0f, 1.5f, 2.0f) }
 
     var finalSubtitleUrl by remember { mutableStateOf<String?>(null) }
@@ -1951,9 +2257,9 @@ fun VideoPlayerScreen(
                                         if (parent != null && parent.exists() && parent.isDirectory) {
                                             val subs = parent.listFiles { _, name ->
                                                 val lower = name.lowercase()
-                                                val isSubExt = lower.endsWith(".smi") || lower.endsWith(".srt") || lower.endsWith(".vtt") || lower.endsWith(".ass")
+                                                val isSubExt = lower.endsWith(".smi") || lower.endsWith(".srt") || lower.endsWith(".vtt") || lower.endsWith(".ass") || lower.endsWith(".ssa") || lower.endsWith(".sub") || lower.endsWith(".txt")
                                                 val itBase = name.substringBeforeLast(".")
-                                                isSubExt && (itBase == baseName || (itBase.startsWith(baseName) && itBase.getOrNull(baseName.length) == '.'))
+                                                isSubExt && (itBase.equals(baseName, ignoreCase = true) || (itBase.startsWith(baseName, ignoreCase = true) && itBase.getOrNull(baseName.length) == '.'))
                                             }
                                             if (subs != null && subs.isNotEmpty()) {
                                                 val subFile = subs.find { it.extension.equals("ass", true) }
@@ -1984,7 +2290,7 @@ fun VideoPlayerScreen(
                 if (lastDotIndex > 0) {
                     val baseUrl = videoUrl.substring(0, lastDotIndex)
                     var probeFound = false
-                    for (probeExt in listOf("ass", "srt", "smi")) {
+                    for (probeExt in listOf("ass", "ssa", "srt", "smi", "vtt", "sub", "txt")) {
                         val probeUrl = "$baseUrl.$probeExt"
                         android.util.Log.d("AutoPlay", "VideoPlayerScreen: Probing subtitle: $probeUrl")
                         try {
@@ -2065,17 +2371,23 @@ fun VideoPlayerScreen(
                         SmbManager.buildContext(userName, password)
                     }
                 }
+                private val ftpDataSource by lazy { FtpDataSource() }
+                private val sftpDataSource by lazy { SftpDataSource() }
 
                 override fun addTransferListener(transferListener: androidx.media3.datasource.TransferListener) {
                     defaultDataSource.addTransferListener(transferListener)
                     smbDataSource.addTransferListener(transferListener)
+                    ftpDataSource.addTransferListener(transferListener)
+                    sftpDataSource.addTransferListener(transferListener)
                 }
 
                 override fun open(dataSpec: androidx.media3.datasource.DataSpec): Long {
-                    activeDataSource = if (dataSpec.uri.scheme?.lowercase() == "smb") {
-                        smbDataSource
-                    } else {
-                        defaultDataSource
+                    val scheme = dataSpec.uri.scheme?.lowercase()
+                    activeDataSource = when (scheme) {
+                        "smb" -> smbDataSource
+                        "ftp" -> ftpDataSource
+                        "sftp" -> sftpDataSource
+                        else -> defaultDataSource
                     }
                     return activeDataSource!!.open(dataSpec)
                 }
@@ -2104,7 +2416,12 @@ fun VideoPlayerScreen(
             .setMediaSourceFactory(mediaSourceFactory)
             .setTrackSelector(trackSelector)
             .build().apply {
-                val mediaItemBuilder = MediaItem.Builder().setUri(finalVideoUrl)
+                val mediaMetadata = androidx.media3.common.MediaMetadata.Builder()
+                    .setTitle(title)
+                    .build()
+                val mediaItemBuilder = MediaItem.Builder()
+                    .setUri(finalVideoUrl)
+                    .setMediaMetadata(mediaMetadata)
                 if (finalSubtitleUrl != null) {
                     val isSmi = finalSubtitleExt?.equals("smi", ignoreCase = true) == true || finalSubtitleUrl!!.lowercase().endsWith(".smi")
                     val isVtt = finalSubtitleExt?.equals("vtt", ignoreCase = true) == true || finalSubtitleUrl!!.lowercase().endsWith(".vtt")
@@ -2116,7 +2433,11 @@ fun VideoPlayerScreen(
                         else -> androidx.media3.common.MimeTypes.APPLICATION_SUBRIP
                     }
                     android.util.Log.d("VideoPlayerScreen", "Loading subtitle: $finalSubtitleUrl MimeType: $mimeType")
-                    val uri = if (finalSubtitleUrl!!.startsWith("http") || finalSubtitleUrl!!.startsWith("file://")) {
+                    val uri = if (finalSubtitleUrl!!.startsWith("http") || 
+                        finalSubtitleUrl!!.startsWith("file://") || 
+                        finalSubtitleUrl!!.startsWith("sftp://") || 
+                        finalSubtitleUrl!!.startsWith("ftp://") || 
+                        finalSubtitleUrl!!.startsWith("smb://")) {
                         android.net.Uri.parse(finalSubtitleUrl)
                     } else {
                         android.net.Uri.fromFile(java.io.File(finalSubtitleUrl!!))
@@ -2132,6 +2453,58 @@ fun VideoPlayerScreen(
                 }
                 setMediaItem(mediaItemBuilder.build())
                 prepare()
+                
+                // --- 디버깅 로그 추가 ---
+                addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+                    override fun onAudioDecoderInitialized(
+                        eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                        decoderName: String,
+                        initializedTimestampMs: Long,
+                        initializationDurationMs: Long
+                    ) {
+                        android.util.Log.i("ExoPlayer_Debug", "✅ Audio Decoder Initialized: $decoderName")
+                    }
+                })
+
+                addListener(object : androidx.media3.common.Player.Listener {
+                    override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                        for (group in tracks.groups) {
+                            if (group.type == androidx.media3.common.C.TRACK_TYPE_AUDIO) {
+                                for (i in 0 until group.length) {
+                                    val format = group.getTrackFormat(i)
+                                    val isSelected = group.isTrackSelected(i)
+                                    // 해당 트랙이 렌더러에 의해 지원되는지 확인
+                                    val support = group.getTrackSupport(i)
+                                    val supportStr = when(support) {
+                                        androidx.media3.common.C.FORMAT_HANDLED -> "HANDLED"
+                                        androidx.media3.common.C.FORMAT_EXCEEDS_CAPABILITIES -> "EXCEEDS_CAPS"
+                                        androidx.media3.common.C.FORMAT_UNSUPPORTED_DRM -> "UNSUPPORTED_DRM"
+                                        androidx.media3.common.C.FORMAT_UNSUPPORTED_SUBTYPE -> "UNSUPPORTED_SUBTYPE"
+                                        androidx.media3.common.C.FORMAT_UNSUPPORTED_TYPE -> "UNSUPPORTED_TYPE"
+                                        else -> "UNKNOWN"
+                                    }
+                                    android.util.Log.i("ExoPlayer_Debug", "🔊 Audio Track [$i]: ${format.sampleMimeType}, Support: $supportStr, Selected: $isSelected")
+                                }
+                            }
+                        }
+                    }
+
+                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        android.util.Log.e("ExoPlayer_Debug", "❌ Player Error: ${error.message}", error)
+                    }
+                })
+
+                // 코덱 상태 확인 로그 (토스트 제거)
+                val codecStatus = if (FfmpegLoader.isLoaded) "FFmpeg 로드됨" else "기본 코덱 사용"
+                try {
+                    val clazz = Class.forName("androidx.media3.decoder.ffmpeg.FfmpegLibrary")
+                    val isAvailable = clazz.getMethod("isAvailable").invoke(null) as Boolean
+                    val detail = if (isAvailable) " (가용성: 확인됨)" else " (가용성: 실패)"
+                    android.util.Log.i("ExoPlayer_Debug", "📦 Codec Status: $codecStatus$detail")
+                } catch(e: Exception) {
+                    android.util.Log.i("ExoPlayer_Debug", "📦 Codec Status: $codecStatus")
+                }
+
                 playWhenReady = true
                 
                 // 저장된 재생 위치로 이동
@@ -2146,10 +2519,45 @@ fun VideoPlayerScreen(
     // Props version is used directly to ensure sync on recomposition
     // key(videoUrl) in MainActivity ensures fresh state on video change
 
+    // 썸네일 비동기 추출 및 알림창 배경 업데이트
+    LaunchedEffect(videoUrl) {
+        val thumbnailUri = ThumbnailExtractor.extractThumbnailUri(context, videoUrl)
+        if (thumbnailUri != null) {
+            val currentIndex = exoPlayer.currentMediaItemIndex
+            if (currentIndex >= 0 && currentIndex < exoPlayer.mediaItemCount) {
+                val currentItem = exoPlayer.getMediaItemAt(currentIndex)
+                val updatedMetadata = currentItem.mediaMetadata.buildUpon()
+                    .setArtworkUri(thumbnailUri)
+                    .build()
+                val updatedMediaItem = currentItem.buildUpon()
+                    .setMediaMetadata(updatedMetadata)
+                    .build()
+                
+                exoPlayer.replaceMediaItem(currentIndex, updatedMediaItem)
+                android.util.Log.d("VideoPlayerScreen", "Artwork thumbnail injected into MediaSession Notification!")
+            }
+        }
+    }
+
     DisposableEffect(exoPlayer) {
         mainActivity?.setPipPlayer(exoPlayer)
+        PlayerSingleton.player = exoPlayer
+            
+        val serviceIntent = android.content.Intent(context, PlaybackService::class.java)
+        try {
+            androidx.core.content.ContextCompat.startForegroundService(context, serviceIntent)
+        } catch (e: Exception) {
+            android.util.Log.e("VideoPlayerScreen", "Failed to start MediaSessionService", e)
+        }
+        
         onDispose {
             mainActivity?.clearPipParams()
+            try {
+                context.stopService(serviceIntent)
+            } catch (e: Exception) {}
+            PlayerSingleton.mediaSession?.release()
+            PlayerSingleton.mediaSession = null
+            PlayerSingleton.player = null
         }
     }
 
@@ -2290,13 +2698,21 @@ fun VideoPlayerScreen(
             }
             5 -> subtitleScale = maxOf(0.5f, subtitleScale - 0.15f)
             6 -> subtitleScale = minOf(3.0f, subtitleScale + 0.15f)
-            7 -> {
-                val nextIdx = (speeds.indexOf(currentSpeed) + 1) % speeds.size
-                currentSpeed = speeds[nextIdx]
+            7 -> { // 속도 +0.1
+                currentSpeed = (kotlin.math.round((currentSpeed + 0.1f) * 10f) / 10f).coerceIn(0.1f, 2.0f)
                 exoPlayer.setPlaybackSpeed(currentSpeed)
             }
-            8 -> { mainActivity?.enterPipMode(); return }
-            9 -> { onClose(); return }
+            8 -> { // 속도 초기화 (1.0x)
+                currentSpeed = 1.0f
+                exoPlayer.setPlaybackSpeed(currentSpeed)
+            }
+            9 -> { // 속도 -0.1
+                currentSpeed = (kotlin.math.round((currentSpeed - 0.1f) * 10f) / 10f).coerceIn(0.1f, 2.0f)
+                exoPlayer.setPlaybackSpeed(currentSpeed)
+            }
+            10 -> isOrientationLocked = !isOrientationLocked // 회전 잠금/해제 토글
+            11 -> { mainActivity?.enterPipMode(); return }
+            12 -> { onClose(); return }
         }
         resetHideTimer()
     }
@@ -2313,13 +2729,49 @@ fun VideoPlayerScreen(
             .background(Color.Black)
             .focusRequester(focusRequester)
             .focusable()
-            .clickable(
-                indication = null,
-                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-            ) {
-                // 터치 클릭: 컨트롤 토글
-                onControlVisibilityChange(!isControlVisible)
-                if (!isControlVisible) hideTimerKey++
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onTap = {
+                        onControlVisibilityChange(!currentIsControlVisible)
+                        if (!currentIsControlVisible) hideTimerKey++
+                    },
+                    onDoubleTap = { offset ->
+                        val screenWidth = size.width
+                        if (offset.x < screenWidth / 2f) {
+                            exoPlayer.seekTo((exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L))
+                            seekIndicatorText = "-10초"
+                            showSeekIndicator = true
+                        } else {
+                            val duration = exoPlayer.duration.coerceAtLeast(0L)
+                            exoPlayer.seekTo((exoPlayer.currentPosition + 10_000L).coerceAtMost(duration))
+                            seekIndicatorText = "+10초"
+                            showSeekIndicator = true
+                        }
+                    }
+                )
+            }
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(
+                    onDragStart = { _ ->
+                        isDraggingScreen = true
+                        screenDragPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
+                        showSeekIndicator = true
+                    },
+                    onDragEnd = {
+                        isDraggingScreen = false
+                        exoPlayer.seekTo(screenDragPosition)
+                    },
+                    onDragCancel = {
+                        isDraggingScreen = false
+                        showSeekIndicator = false
+                    },
+                    onHorizontalDrag = { change: androidx.compose.ui.input.pointer.PointerInputChange, dragAmount: Float ->
+                        val duration = exoPlayer.duration.coerceAtLeast(1L)
+                        val deltaMs = (dragAmount * 150).toLong()
+                        screenDragPosition = (screenDragPosition + deltaMs).coerceIn(0L, duration)
+                        seekIndicatorText = "${formatSrtTime(screenDragPosition).substringBefore(",")} / ${formatSrtTime(duration).substringBefore(",")}"
+                    }
+                )
             }
             .onKeyEvent { event ->
                 if (event.type == KeyEventType.KeyDown) {
@@ -2345,11 +2797,11 @@ fun VideoPlayerScreen(
                         }
                         Key.DirectionRight -> {
                             if (isControlVisible) {
-                                if (focusedButtonIndex == 10) {
+                                if (focusedButtonIndex == 100) { // Slider index changed to 100 to avoid conflict
                                     // Slider seek +5s
                                     exoPlayer.seekTo((exoPlayer.currentPosition + 5_000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
                                 } else {
-                                    focusedButtonIndex = minOf(9, focusedButtonIndex + 1)
+                                    focusedButtonIndex = minOf(12, focusedButtonIndex + 1)
                                 }
                                 resetHideTimer()
                             } else {
@@ -2358,8 +2810,8 @@ fun VideoPlayerScreen(
                             true
                         }
                         Key.DirectionUp -> {
-                            if (isControlVisible && focusedButtonIndex < 10) {
-                                focusedButtonIndex = 10 // Move to Slider
+                            if (isControlVisible && focusedButtonIndex < 100) {
+                                focusedButtonIndex = 100 // Move to Slider
                             } else {
                                 subtitleScale = minOf(3.0f, subtitleScale + 0.15f)
                             }
@@ -2367,7 +2819,7 @@ fun VideoPlayerScreen(
                             true
                         }
                         Key.DirectionDown -> {
-                            if (isControlVisible && focusedButtonIndex == 10) {
+                            if (isControlVisible && focusedButtonIndex == 100) {
                                 focusedButtonIndex = 2 // Move to Play/Pause button
                             } else {
                                 subtitleScale = maxOf(0.5f, subtitleScale - 0.15f)
@@ -2406,21 +2858,7 @@ fun VideoPlayerScreen(
                         }
                         
                         override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
-                            val activity = ctx as? android.app.Activity ?: return
-                            val isRotated = videoSize.unappliedRotationDegrees % 180 != 0
-                            val actualWidth = if (isRotated) videoSize.height else videoSize.width
-                            val actualHeight = if (isRotated) videoSize.width else videoSize.height
-                            
-                            if (actualWidth > 0 && actualHeight > 0) {
-                                val isVertical = actualHeight > actualWidth
-                                if (isVertical) {
-                                    // 세로 동영상: 센서에 따라 회전 (세로로 들면 세로로, 가로로 들면 가로로)
-                                    activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR
-                                } else {
-                                    // 가로 동영상: 항상 가로 고정
-                                    activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                                }
-                            }
+                            videoSizeState = videoSize
                         }
                     })
                 }
@@ -2483,8 +2921,8 @@ fun VideoPlayerScreen(
                         .fillMaxWidth()
                         .padding(vertical = 0.dp)
                         .border(
-                            width = if (focusedButtonIndex == 10) 3.dp else 0.dp,
-                            color = if (focusedButtonIndex == 10) PrimaryColor else Color.Transparent,
+                            width = if (focusedButtonIndex == 100) 3.dp else 0.dp,
+                            color = if (focusedButtonIndex == 100) PrimaryColor else Color.Transparent,
                             shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp)
                         )
                 )
@@ -2510,29 +2948,40 @@ fun VideoPlayerScreen(
                             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                         ) {
                             TvControlButton(label = "⏮\n이전", isFocused = focusedButtonIndex == 0, highlightColor = PrimaryColor, onClick = { executeButton(0) }, enabled = hasPrevious)
-                            Spacer(Modifier.width(10.dp))
+                            Spacer(Modifier.width(8.dp))
                             TvControlButton(label = "◀◀\n-10초", isFocused = focusedButtonIndex == 1, highlightColor = PrimaryColor, onClick = { executeButton(1) })
-                            Spacer(Modifier.width(10.dp))
+                            Spacer(Modifier.width(8.dp))
                             TvControlButton(label = if (isPlaying) "⏸" else "▶", isFocused = focusedButtonIndex == 2, highlightColor = PrimaryColor, isLarge = true, onClick = { executeButton(2) })
-                            Spacer(Modifier.width(10.dp))
+                            Spacer(Modifier.width(8.dp))
                             TvControlButton(label = "+10초\n▶▶", isFocused = focusedButtonIndex == 3, highlightColor = PrimaryColor, onClick = { executeButton(3) })
-                            Spacer(Modifier.width(10.dp))
+                            Spacer(Modifier.width(8.dp))
                             TvControlButton(label = "⏭\n다음", isFocused = focusedButtonIndex == 4, highlightColor = PrimaryColor, onClick = { executeButton(4) }, enabled = hasNext)
                         }
-                        Spacer(Modifier.height(16.dp))
+                        Spacer(Modifier.height(10.dp))
                         Row(
                             horizontalArrangement = Arrangement.Center,
                             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                         ) {
                             TvControlButton(label = "자막\n－", isFocused = focusedButtonIndex == 5, highlightColor = PrimaryColor, onClick = { executeButton(5) })
-                            Spacer(Modifier.width(10.dp))
+                            Spacer(Modifier.width(8.dp))
                             TvControlButton(label = "자막\n＋", isFocused = focusedButtonIndex == 6, highlightColor = PrimaryColor, onClick = { executeButton(6) })
-                            Spacer(Modifier.width(20.dp))
-                            TvControlButton(label = "${currentSpeed}x\n속도", isFocused = focusedButtonIndex == 7, highlightColor = PrimaryColor, onClick = { executeButton(7) })
-                            Spacer(Modifier.width(20.dp))
-                            TvControlButton(label = "PIP\n화면", isFocused = focusedButtonIndex == 8, highlightColor = PrimaryColor, onClick = { executeButton(8) })
-                            Spacer(Modifier.width(20.dp))
-                            TvControlButton(label = "✕\n닫기", isFocused = focusedButtonIndex == 9, highlightColor = PrimaryColor, onClick = { executeButton(9) })
+                            Spacer(Modifier.width(8.dp))
+                            TvControlButton(label = "속도\n＋", isFocused = focusedButtonIndex == 7, highlightColor = PrimaryColor, onClick = { executeButton(7) })
+                            Spacer(Modifier.width(8.dp))
+                            TvControlButton(label = "${currentSpeed}x\n초기화", isFocused = focusedButtonIndex == 8, highlightColor = PrimaryColor, onClick = { executeButton(8) })
+                            Spacer(Modifier.width(8.dp))
+                            TvControlButton(label = "속도\n－", isFocused = focusedButtonIndex == 9, highlightColor = PrimaryColor, onClick = { executeButton(9) })
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            TvControlButton(label = if (isOrientationLocked) "회전\n잠금" else "회전\n해제", isFocused = focusedButtonIndex == 10, highlightColor = PrimaryColor, onClick = { executeButton(10) })
+                            Spacer(Modifier.width(16.dp))
+                            TvControlButton(label = "PIP\n화면", isFocused = focusedButtonIndex == 11, highlightColor = PrimaryColor, onClick = { executeButton(11) })
+                            Spacer(Modifier.width(16.dp))
+                            TvControlButton(label = "✕\n닫기", isFocused = focusedButtonIndex == 12, highlightColor = PrimaryColor, onClick = { executeButton(12) })
                         }
                     }
                 } else {
@@ -2542,24 +2991,30 @@ fun VideoPlayerScreen(
                         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                     ) {
                         TvControlButton(label = "⏮\n이전", isFocused = focusedButtonIndex == 0, highlightColor = PrimaryColor, onClick = { executeButton(0) }, enabled = hasPrevious)
-                        Spacer(Modifier.width(10.dp))
+                        Spacer(Modifier.width(8.dp))
                         TvControlButton(label = "◀◀\n-10초", isFocused = focusedButtonIndex == 1, highlightColor = PrimaryColor, onClick = { executeButton(1) })
-                        Spacer(Modifier.width(10.dp))
+                        Spacer(Modifier.width(8.dp))
                         TvControlButton(label = if (isPlaying) "⏸" else "▶", isFocused = focusedButtonIndex == 2, highlightColor = PrimaryColor, isLarge = true, onClick = { executeButton(2) })
-                        Spacer(Modifier.width(10.dp))
+                        Spacer(Modifier.width(8.dp))
                         TvControlButton(label = "+10초\n▶▶", isFocused = focusedButtonIndex == 3, highlightColor = PrimaryColor, onClick = { executeButton(3) })
-                        Spacer(Modifier.width(10.dp))
+                        Spacer(Modifier.width(8.dp))
                         TvControlButton(label = "⏭\n다음", isFocused = focusedButtonIndex == 4, highlightColor = PrimaryColor, onClick = { executeButton(4) }, enabled = hasNext)
-                        Spacer(Modifier.width(20.dp))
+                        Spacer(Modifier.width(16.dp))
                         TvControlButton(label = "자막\n－", isFocused = focusedButtonIndex == 5, highlightColor = PrimaryColor, onClick = { executeButton(5) })
-                        Spacer(Modifier.width(10.dp))
+                        Spacer(Modifier.width(8.dp))
                         TvControlButton(label = "자막\n＋", isFocused = focusedButtonIndex == 6, highlightColor = PrimaryColor, onClick = { executeButton(6) })
-                        Spacer(Modifier.width(20.dp))
-                        TvControlButton(label = "${currentSpeed}x\n속도", isFocused = focusedButtonIndex == 7, highlightColor = PrimaryColor, onClick = { executeButton(7) })
-                        Spacer(Modifier.width(20.dp))
-                        TvControlButton(label = "PIP\n화면", isFocused = focusedButtonIndex == 8, highlightColor = PrimaryColor, onClick = { executeButton(8) })
-                        Spacer(Modifier.width(20.dp))
-                        TvControlButton(label = "✕\n닫기", isFocused = focusedButtonIndex == 9, highlightColor = PrimaryColor, onClick = { executeButton(9) })
+                        Spacer(Modifier.width(16.dp))
+                        TvControlButton(label = "속도\n＋", isFocused = focusedButtonIndex == 7, highlightColor = PrimaryColor, onClick = { executeButton(7) })
+                        Spacer(Modifier.width(8.dp))
+                        TvControlButton(label = "${currentSpeed}x\n초기화", isFocused = focusedButtonIndex == 8, highlightColor = PrimaryColor, onClick = { executeButton(8) })
+                        Spacer(Modifier.width(8.dp))
+                        TvControlButton(label = "속도\n－", isFocused = focusedButtonIndex == 9, highlightColor = PrimaryColor, onClick = { executeButton(9) })
+                        Spacer(Modifier.width(16.dp))
+                        TvControlButton(label = if (isOrientationLocked) "회전\n잠금" else "회전\n해제", isFocused = focusedButtonIndex == 10, highlightColor = PrimaryColor, onClick = { executeButton(10) })
+                        Spacer(Modifier.width(16.dp))
+                        TvControlButton(label = "PIP\n화면", isFocused = focusedButtonIndex == 11, highlightColor = PrimaryColor, onClick = { executeButton(11) })
+                        Spacer(Modifier.width(16.dp))
+                        TvControlButton(label = "✕\n닫기", isFocused = focusedButtonIndex == 12, highlightColor = PrimaryColor, onClick = { executeButton(12) })
                     }
                 }
 
@@ -2570,6 +3025,28 @@ fun VideoPlayerScreen(
                     color = Color.White.copy(alpha = 0.45f),
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.align(androidx.compose.ui.Alignment.CenterHorizontally)
+                )
+            }
+        }
+
+        // --- Seek Indicator Overlay ---
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showSeekIndicator,
+            enter = androidx.compose.animation.fadeIn(tween(150)),
+            exit = androidx.compose.animation.fadeOut(tween(300)),
+            modifier = Modifier.align(androidx.compose.ui.Alignment.Center)
+        ) {
+            Box(
+                modifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.6f), androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                    .padding(horizontal = 24.dp, vertical = 16.dp),
+                contentAlignment = androidx.compose.ui.Alignment.Center
+            ) {
+                Text(
+                    text = seekIndicatorText,
+                    color = Color.White,
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold
                 )
             }
         }
@@ -2585,7 +3062,7 @@ fun TvControlButton(
     enabled: Boolean = true,
     onClick: () -> Unit = {}
 ) {
-    val size = if (isLarge) 58.dp else 46.dp
+    val size = if (isLarge) 52.dp else 40.dp
     val alpha = if (enabled) 1f else 0.35f
     // Match Stitch design: Large play button is fully colored, others are slightly translucent
     val isPrimaryFilled = isLarge
@@ -2593,7 +3070,7 @@ fun TvControlButton(
     val textColor = if (isPrimaryFilled) Color(0xFF180F23) else (if (isFocused && enabled) highlightColor else Color.White)
     val borderColor = if (isFocused && !isPrimaryFilled && enabled) highlightColor else Color.White.copy(alpha = 0.1f)
     val borderWidth = if (isFocused && !isPrimaryFilled && enabled) 2.dp else 1.dp
-    val fontSize = if (isLarge) MaterialTheme.typography.titleMedium else MaterialTheme.typography.labelMedium
+    val fontSize = if (isLarge) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.labelSmall
     val shape = androidx.compose.foundation.shape.CircleShape // Stitch design uses rounded-full for buttons
 
     Box(
@@ -2662,6 +3139,26 @@ suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitl
             }
             if (conn.responseCode !in 200..299) return@withContext null to null
             conn.inputStream.readBytes()
+        } else if (subtitleUrl.startsWith("sftp://")) {
+            val uri = android.net.Uri.parse(subtitleUrl)
+            val userInfo = uri.userInfo
+            val username = userInfo?.substringBefore(":") ?: ""
+            val password = userInfo?.substringAfter(":", "") ?: ""
+            val host = uri.host ?: ""
+            val port = if (uri.port > 0) uri.port else 22
+            val remotePath = uri.path ?: ""
+            
+            SftpManager.getFileBytes(host, port, username, password, remotePath).getOrNull()
+        } else if (subtitleUrl.startsWith("ftp://")) {
+            val uri = android.net.Uri.parse(subtitleUrl)
+            val userInfo = uri.userInfo
+            val username = userInfo?.substringBefore(":") ?: ""
+            val password = userInfo?.substringAfter(":", "") ?: ""
+            val host = uri.host ?: ""
+            val port = if (uri.port > 0) uri.port else 21
+            val remotePath = uri.path ?: ""
+            
+            FtpManager.getFileBytes(host, port, username, password, remotePath).getOrNull()
         } else {
             val path = subtitleUrl.replace("file://", "")
             val file = java.io.File(path)
@@ -2781,25 +3278,52 @@ fun LocalBrowserScreen(
     padding: PaddingValues,
     isTvMode: Boolean = false,
     initialSelectedIndex: Int = 0,
+    sortOrder: SortOrder,
+    onSortOrderChange: (SortOrder) -> Unit,
+    viewMode: LocalViewMode,
+    onViewModeChange: (LocalViewMode) -> Unit,
+    selectedFolder: String?,
+    onSelectedFolderChange: (String?) -> Unit,
     onBackClick: () -> Unit,
     onItemClick: (LocalVideoItem, Int, List<LocalVideoItem>) -> Unit
 ) {
     var videos by remember { mutableStateOf<List<LocalVideoItem>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var sortMenuExpanded by remember { mutableStateOf(false) }
     
     val context = androidx.compose.ui.platform.LocalContext.current
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
-    LaunchedEffect(videos, isLoading) {
-        if (!isLoading && videos.isNotEmpty()) {
-            if (initialSelectedIndex in videos.indices) {
+    // 폴더 목록 추출 (videos가 바뀔 때마다 계산)
+    val folders = remember(videos) {
+        videos.mapNotNull { it.path?.substringBeforeLast("/") }
+            .distinct()
+            .map { fullPath -> 
+                val name = fullPath.substringAfterLast("/")
+                name to fullPath
+            }
+            .sortedBy { it.first.lowercase() }
+    }
+
+    // 현재 뷰모드와 선택된 폴더에 따라 보여줄 목록 필터링
+    val displayVideos = remember(videos, viewMode, selectedFolder) {
+        if (viewMode == LocalViewMode.FOLDERS && selectedFolder != null) {
+            videos.filter { it.path?.startsWith(selectedFolder) == true }
+        } else {
+            videos
+        }
+    }
+
+    LaunchedEffect(displayVideos, isLoading) {
+        if (!isLoading && displayVideos.isNotEmpty()) {
+            if (initialSelectedIndex in displayVideos.indices) {
                 listState.scrollToItem(initialSelectedIndex)
             }
         }
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(sortOrder) {
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
                 isLoading = true
@@ -2816,17 +3340,23 @@ fun LocalBrowserScreen(
                     android.provider.MediaStore.Video.Media.DISPLAY_NAME,
                     android.provider.MediaStore.Video.Media.DURATION,
                     android.provider.MediaStore.Video.Media.SIZE,
-                    android.provider.MediaStore.Video.Media.DATA
+                    android.provider.MediaStore.Video.Media.DATA,
+                    android.provider.MediaStore.Video.Media.DATE_ADDED
                 )
 
-                val sortOrder = "${android.provider.MediaStore.Video.Media.DISPLAY_NAME} ASC"
+                val mediaStoreSortOrder = when (sortOrder) {
+                    SortOrder.NAME_ASC -> "${android.provider.MediaStore.Video.Media.DISPLAY_NAME} ASC"
+                    SortOrder.NAME_DESC -> "${android.provider.MediaStore.Video.Media.DISPLAY_NAME} DESC"
+                    SortOrder.DATE_DESC -> "${android.provider.MediaStore.Video.Media.DATE_ADDED} DESC"
+                    SortOrder.DATE_ASC -> "${android.provider.MediaStore.Video.Media.DATE_ADDED} ASC"
+                }
 
                 context.contentResolver.query(
                     collection,
                     projection,
                     null,
                     null,
-                    sortOrder
+                    mediaStoreSortOrder
                 )?.use { cursor ->
                     val idColumn = cursor.getColumnIndexOrThrow(android.provider.MediaStore.Video.Media._ID)
                     val nameColumn = cursor.getColumnIndexOrThrow(android.provider.MediaStore.Video.Media.DISPLAY_NAME)
@@ -2864,13 +3394,22 @@ fun LocalBrowserScreen(
     ) {
         TopAppBar(
             title = { 
-                Text(
-                    text = "로컬 동영상",
-                    color = MaterialTheme.colorScheme.onBackground,
-                    fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                ) 
+                Column {
+                    Text(
+                        text = if (viewMode == LocalViewMode.ALL_VIDEOS) "로컬 동영상 (전체)" 
+                               else if (selectedFolder == null) "로컬 동영상 (폴더별)"
+                               else "폴더: ${selectedFolder.substringAfterLast("/")}",
+                        color = MaterialTheme.colorScheme.onBackground,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = sortOrder.displayName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
             },
             navigationIcon = {
                 IconButton(onClick = onBackClick) {
@@ -2878,6 +3417,47 @@ fun LocalBrowserScreen(
                 }
             },
             actions = {
+                // 뷰 모드 전환 버튼
+                IconButton(onClick = {
+                    onViewModeChange(
+                        if (viewMode == LocalViewMode.ALL_VIDEOS) LocalViewMode.FOLDERS 
+                        else LocalViewMode.ALL_VIDEOS
+                    )
+                    onSelectedFolderChange(null)
+                }) {
+                    Icon(
+                        imageVector = if (viewMode == LocalViewMode.ALL_VIDEOS) Icons.Default.Folder else Icons.Default.List,
+                        contentDescription = "Toggle View Mode",
+                        tint = MaterialTheme.colorScheme.onBackground
+                    )
+                }
+
+                // 정렬 메뉴
+                Box {
+                    IconButton(onClick = { sortMenuExpanded = true }) {
+                        Icon(Icons.Default.Sort, contentDescription = "Sort", tint = MaterialTheme.colorScheme.onBackground)
+                    }
+                    DropdownMenu(
+                        expanded = sortMenuExpanded,
+                        onDismissRequest = { sortMenuExpanded = false }
+                    ) {
+                        SortOrder.values().forEach { order ->
+                            DropdownMenuItem(
+                                text = { Text(order.displayName) },
+                                onClick = {
+                                    onSortOrderChange(order)
+                                    sortMenuExpanded = false
+                                },
+                                leadingIcon = {
+                                    if (sortOrder == order) {
+                                        Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+                
                 ExitAppButton()
             },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
@@ -2917,110 +3497,178 @@ fun LocalBrowserScreen(
                 contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 80.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                itemsIndexed(videos, key = { _, video -> video.id }) { index, video ->
-                    var isFocused by remember { mutableStateOf(false) }
-                    val itemFocusRequester = remember { FocusRequester() }
-                    val PrimaryColor = MaterialTheme.colorScheme.primary
+                if (viewMode == LocalViewMode.FOLDERS && selectedFolder == null) {
+                    items(folders) { (name, fullPath) ->
+                        var isFocused by remember { mutableStateOf(false) }
+                        val itemFocusRequester = remember { FocusRequester() }
+                        val PrimaryColor = MaterialTheme.colorScheme.primary
 
-                    if (!isLoading && index == initialSelectedIndex) {
-                        LaunchedEffect(Unit) {
-                            try { itemFocusRequester.requestFocus() } catch(e:Exception){}
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(itemFocusRequester)
+                                .onFocusChanged { isFocused = it.isFocused }
+                                .focusable()
+                                .onKeyEvent { event ->
+                                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                        onSelectedFolderChange(fullPath)
+                                        true
+                                    } else false
+                                }
+                                .clickable { onSelectedFolderChange(fullPath) }
+                                .border(
+                                    width = if (isTvMode && isFocused) 3.dp else 0.dp,
+                                    color = if (isTvMode && isFocused) PrimaryColor else Color.Transparent,
+                                    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+                                ),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(16.dp),
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f), shape = androidx.compose.foundation.shape.CircleShape),
+                                    contentAlignment = androidx.compose.ui.Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Folder,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.secondary,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = name, 
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                    )
+                                    val count = videos.count { it.path?.startsWith(fullPath) == true }
+                                    Text(
+                                        text = "동영상 ${count}개", 
+                                        style = MaterialTheme.typography.bodySmall, 
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
                     }
+                } else {
+                    itemsIndexed(displayVideos, key = { _, video -> video.id }) { index, video ->
+                        var isFocused by remember { mutableStateOf(false) }
+                        val itemFocusRequester = remember { FocusRequester() }
+                        val PrimaryColor = MaterialTheme.colorScheme.primary
 
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(itemFocusRequester)
-                            .onFocusChanged { isFocused = it.isFocused }
-                            .focusable()
-                            .onKeyEvent { event ->
-                                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
-                                    onItemClick(video, index, videos)
-                                    true
-                                } else false
+                        if (!isLoading && index == initialSelectedIndex) {
+                            LaunchedEffect(Unit) {
+                                try { itemFocusRequester.requestFocus() } catch(e:Exception){}
                             }
-                            .clickable { onItemClick(video, index, videos) }
-                            .border(
-                                width = if (isTvMode && isFocused) 3.dp else 0.dp,
-                                color = if (isTvMode && isFocused) PrimaryColor else Color.Transparent,
-                                shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
-                            ),
-                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(16.dp),
-                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        }
+
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(itemFocusRequester)
+                                .onFocusChanged { isFocused = it.isFocused }
+                                .focusable()
+                                .onKeyEvent { event ->
+                                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                        onItemClick(video, index, displayVideos)
+                                        true
+                                    } else false
+                                }
+                                .clickable { onItemClick(video, index, displayVideos) }
+                                .border(
+                                    width = if (isTvMode && isFocused) 3.dp else 0.dp,
+                                    color = if (isTvMode && isFocused) PrimaryColor else Color.Transparent,
+                                    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+                                ),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f), shape = androidx.compose.foundation.shape.CircleShape),
-                                contentAlignment = androidx.compose.ui.Alignment.Center
+                            Row(
+                                modifier = Modifier.padding(16.dp),
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(16.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = video.title, 
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
-                                    maxLines = 2,
-                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                                )
-                                val sizeMb = video.size / (1024.0 * 1024.0)
-                                val durationText = formatSrtTime(video.duration).substringBefore(",") // Basic formatting
-                                Text(
-                                    text = String.format(java.util.Locale.US, "%.1f MB • %s", sizeMb, durationText), 
-                                    style = MaterialTheme.typography.bodySmall, 
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            // 저장된 재생 위치 표시 (시간 + 프로그레스 바)
-                            val savedPos = PlaybackPositionStore.getPosition(context, video.uri.toString())
-                            if (savedPos > 0L) {
-                                val savedDur = PlaybackPositionStore.getDuration(context, video.uri.toString())
-                                val effectiveDur = if (savedDur > 0L) savedDur else if (video.duration > 0) video.duration else 0L
-                                Column(
-                                    horizontalAlignment = androidx.compose.ui.Alignment.End,
-                                    modifier = Modifier.padding(start = 12.dp).width(72.dp)
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f), shape = androidx.compose.foundation.shape.CircleShape),
+                                    contentAlignment = androidx.compose.ui.Alignment.Center
                                 ) {
-                                    Text(
-                                        text = "▶ " + PlaybackPositionStore.formatPosition(savedPos),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(24.dp)
                                     )
-                                    if (effectiveDur > 0L) {
-                                        Spacer(Modifier.height(3.dp))
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(4.dp)
-                                                .background(
-                                                    MaterialTheme.colorScheme.surfaceVariant,
-                                                    shape = androidx.compose.foundation.shape.RoundedCornerShape(2.dp)
-                                                )
-                                        ) {
-                                            val progress = (savedPos.toFloat() / effectiveDur.toFloat()).coerceIn(0f, 1f)
+                                }
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = video.title, 
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                                        maxLines = 2,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                    )
+                                    val sizeMb = video.size / (1024.0 * 1024.0)
+                                    val durationText = formatSrtTime(video.duration).substringBefore(",") // Basic formatting
+                                    Text(
+                                        text = String.format(java.util.Locale.US, "%.1f MB • %s", sizeMb, durationText), 
+                                        style = MaterialTheme.typography.bodySmall, 
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                // 저장된 재생 위치 표시 (시간 + 프로그레스 바)
+                                val savedPos = PlaybackPositionStore.getPosition(context, video.uri.toString())
+                                if (savedPos > 0L) {
+                                    val savedDur = PlaybackPositionStore.getDuration(context, video.uri.toString())
+                                    val effectiveDur = if (savedDur > 0L) savedDur else if (video.duration > 0) video.duration else 0L
+                                    Column(
+                                        horizontalAlignment = androidx.compose.ui.Alignment.End,
+                                        modifier = Modifier.padding(start = 12.dp).width(72.dp)
+                                    ) {
+                                        Text(
+                                            text = "▶ " + PlaybackPositionStore.formatPosition(savedPos),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                        )
+                                        if (effectiveDur > 0L) {
+                                            Spacer(Modifier.height(3.dp))
                                             Box(
                                                 modifier = Modifier
-                                                    .fillMaxWidth(progress)
-                                                    .fillMaxHeight()
+                                                    .fillMaxWidth()
+                                                    .height(4.dp)
                                                     .background(
-                                                        MaterialTheme.colorScheme.primary,
+                                                        MaterialTheme.colorScheme.surfaceVariant,
                                                         shape = androidx.compose.foundation.shape.RoundedCornerShape(2.dp)
                                                     )
-                                            )
+                                            ) {
+                                                val progress = (savedPos.toFloat() / effectiveDur.toFloat()).coerceIn(0f, 1f)
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth(progress)
+                                                        .fillMaxHeight()
+                                                        .background(
+                                                            MaterialTheme.colorScheme.primary,
+                                                            shape = androidx.compose.foundation.shape.RoundedCornerShape(2.dp)
+                                                        )
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -3040,14 +3688,18 @@ fun HomeScreen(
     onDlnaClick: () -> Unit,
     onSmbClick: () -> Unit = {},
     onWebDavClick: () -> Unit = {},
+    onFtpSftpClick: () -> Unit = {},
     onLicenseClick: () -> Unit = {},
-    isTvMode: Boolean = false
+    isTvMode: Boolean = false,
+    onZipClick: () -> Unit = {},
+    codecInstallResultMessage: String? = null
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var isLocalFocused by remember { mutableStateOf(false) }
     var isDlnaFocused by remember { mutableStateOf(false) }
     var isSmbFocused by remember { mutableStateOf(false) }
     var isWebDavFocused by remember { mutableStateOf(false) }
+    var isFtpSftpFocused by remember { mutableStateOf(false) }
 
     val card1BorderStart = Color(0xFFD280FF)
     val card1BorderEnd   = Color(0xFF7C3AED)
@@ -3129,7 +3781,7 @@ fun HomeScreen(
                     modifier = Modifier.padding(bottom = 24.dp)
                 ) {
                     Text(
-                        text = "JS PLAYER",
+                        text = "SV PLAYER",
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
                         color = Color.White
@@ -3381,6 +4033,62 @@ fun HomeScreen(
                     }
                 }
 
+                Spacer(Modifier.height(12.dp))
+
+                // FTP / SFTP 접속 Card
+                val card5BorderStart = Color(0xFF48BB78)
+                val card5BorderEnd   = Color(0xFF2F855A)
+                val card5Bg          = Color(0xFF1C4532)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(90.dp)
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                        .background(
+                            Brush.linearGradient(
+                                listOf(card5Bg, Color(0xFF0F2F21)),
+                                start = androidx.compose.ui.geometry.Offset(0f, 0f),
+                                end   = androidx.compose.ui.geometry.Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
+                            )
+                        )
+                        .border(
+                            width = if (isTvMode && isFtpSftpFocused) 2.5.dp else 1.dp,
+                            brush = Brush.linearGradient(listOf(
+                                if (isTvMode && isFtpSftpFocused) Color.White else card5BorderStart,
+                                card5BorderEnd
+                            )),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+                        )
+                        .onFocusChanged { isFtpSftpFocused = it.isFocused }
+                        .focusable()
+                        .onKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) { onFtpSftpClick(); true } else false
+                        }
+                        .clickable { onFtpSftpClick() }
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .background(Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp)),
+                                contentAlignment = androidx.compose.ui.Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Upload, null, tint = Color(0xFFB8E994), modifier = Modifier.size(20.dp))
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Text("FTP / SFTP 접속", style = MaterialTheme.typography.titleMedium, color = Color.White, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            Spacer(Modifier.weight(1f))
+                            Text(">", color = Color.White.copy(alpha = 0.5f), style = MaterialTheme.typography.titleMedium)
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text("FTP 또는 SFTP 서버에 접속하여 영상을 스트리밍합니다.", style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.7f))
+                    }
+                }
+
                 Spacer(Modifier.height(32.dp))
 
                 // ── 앱 접근 권한 안내 섹션 ──────────────────────────────
@@ -3483,11 +4191,15 @@ fun HomeScreen(
                     var showCodecDialog by remember { mutableStateOf(false) }
                     
                     if (showCodecDialog) {
-                        CodecInstallDialog(onDismiss = {
-                            showCodecDialog = false
-                            // 안내창 닫힌 후 수동 복사했을 수도 있으니 다시 로드 시도
-                            FfmpegLoader.initialize(context)
-                        })
+                        CodecInstallDialog(
+                            onDismiss = {
+                                showCodecDialog = false
+                                // 안내창 닫힌 후 수동 복사했을 수도 있으니 다시 로드 시도
+                                FfmpegLoader.initialize(context)
+                            },
+                            onZipClick = onZipClick,
+                            resultMessage = codecInstallResultMessage
+                        )
                     }
 
                     var isCodecFocused by remember { mutableStateOf(false) }
@@ -3538,12 +4250,13 @@ fun HomeScreen(
 }
 
 @Composable
-fun CodecInstallDialog(onDismiss: () -> Unit) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val targetPath = "Android/data/com.sv21c.jsplayer/files/"
+fun CodecInstallDialog(
+    onDismiss: () -> Unit,
+    onZipClick: () -> Unit = {},
+    resultMessage: String? = null
+) {
     val abi = FfmpegLoader.getRequiredAbi()
     val isLoaded = FfmpegLoader.isLoaded
-    val isNativeDtsSupported = FfmpegLoader.isNativeDtsSupported()
 
     var isFocused by remember { mutableStateOf(false) }
 
@@ -3561,33 +4274,31 @@ fun CodecInstallDialog(onDismiss: () -> Unit) {
                     .padding(24.dp)
             ) {
                 Text(
-                    text = "오디오 코덱 설치 안내",
+                    text = "추가 코덱 설치 안내",
                     style = MaterialTheme.typography.titleLarge,
                     color = Color.White,
                     fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
                 )
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(20.dp))
+
                 if (isLoaded) {
                     Text(
-                        text = "현재 추가 코덱 라이브러리(ffmpeg)가 정상적으로 수동 설치되어 로드되었습니다.\nDTS, AC3 등의 오디오를 완벽하게 재생할 수 있습니다.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = Color(0xFF34D399)
-                    )
-                } else if (isNativeDtsSupported) {
-                    Text(
-                        text = "이 기기는 자체 하드웨어(MediaCodec) 로 DTS/AC3 디코딩을 완벽 지원합니다!\n추가 코덱 파일을 설치하지 않으셔도 영상 재생이 가능합니다.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = Color(0xFF6EE7B7)
+                        text = "추가 코덱이 설치가 되어 있습니다.",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = Color(0xFF34D399),
+                        fontWeight = FontWeight.Bold
                     )
                 } else {
                     Text(
-                        text = "이 기기는 DTS, AC3 음성을 자체적으로 지원하지 않습니다. 영상을 원활히 재생하려면 추가 코덱 파일(libffmpegJNI.so)이 반드시 필요합니다.\n\n" +
-                             "저작권(GPL) 정책으로 인해 앱 내에 코덱이 기본 포함되어 있지 않습니다.\n" +
-                             "아래의 경로에 파일을 직접 복사해주시면 앱이 자동으로 인식하여 재생 기능을 활성화합니다.",
+                        text = "추가 코덱이 설치가 되어 있지 않습니다. 아래 버튼 눌러서 코덱이 있는 Zip 파일을 선택 완료 하시면 설치 됩니다.",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = Color.White.copy(alpha = 0.8f)
+                        color = Color.White.copy(alpha = 0.9f),
+                        lineHeight = 22.sp
                     )
+                    
                     Spacer(modifier = Modifier.height(16.dp))
+                    
+                    // 기기 정보 안내 (설치에 도움을 주므로 유지)
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -3595,24 +4306,60 @@ fun CodecInstallDialog(onDismiss: () -> Unit) {
                             .padding(12.dp)
                     ) {
                         Column {
-                            Text(text = "▶ 복사할 경로:", color = Color(0xFFD280FF), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
-                            Text(text = "내장메모리/$targetPath", color = Color.White, style = MaterialTheme.typography.bodySmall)
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(text = "▶ 파일 이름:", color = Color(0xFFD280FF), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
-                            Text(text = "libffmpegJNI.so", color = Color.White, style = MaterialTheme.typography.bodySmall)
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(text = "▶ 기기 아키텍처:", color = Color(0xFFD280FF), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
-                            Text(text = abi, color = Color.White, style = MaterialTheme.typography.bodySmall)
+                            Text(text = "▶ 설치 권장 파일: libffmpegJNI.so", color = Color(0xFFD280FF), style = MaterialTheme.typography.bodySmall)
+                            Text(text = "▶ 현재 기기 아키텍처: $abi", color = Color(0xFFD280FF), style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(28.dp))
+
+                val resultMsg = resultMessage
+                if (resultMsg != null) {
+                    Text(
+                        text = resultMsg,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFFACC15),
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, alignment = androidx.compose.ui.Alignment.End),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                 ) {
+                    var isZipFocused by remember { mutableStateOf(false) }
+                    Button(
+                        onClick = onZipClick,
+                        modifier = Modifier
+                            .onFocusChanged { isZipFocused = it.isFocused }
+                            .focusable()
+                            .border(
+                                width = if (isZipFocused) 2.dp else 0.dp,
+                                color = if (isZipFocused) Color.White else Color.Transparent,
+                                shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+                            ),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF8B5CF6),
+                            contentColor = Color.White
+                        ),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Folder,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "Zip 파일로 코덱 설치",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
                     Button(
                         onClick = onDismiss,
                         modifier = Modifier
@@ -3621,11 +4368,13 @@ fun CodecInstallDialog(onDismiss: () -> Unit) {
                             .border(
                                 width = if (isFocused) 2.dp else 0.dp,
                                 color = if (isFocused) Color.White else Color.Transparent,
-                                shape = androidx.compose.foundation.shape.RoundedCornerShape(50)
+                                shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
                             ),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3B82F6))
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569)), // Grayish Blue
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp)
                     ) {
-                        Text(if (isLoaded) "닫기" else "확인했습니다", color = Color.White)
+                        Text("닫기", color = Color.White, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
                     }
                 }
             }

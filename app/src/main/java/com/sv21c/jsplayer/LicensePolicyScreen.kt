@@ -145,7 +145,7 @@ fun AppLicenseCard(isTvMode: Boolean) {
                 Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFFD280FF))
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "JS PLAYER 라이선스 고지문 (GPL-3.0)",
+                    text = "SV PLAYER 라이선스 고지문 (GPL-3.0)",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
@@ -153,7 +153,7 @@ fun AppLicenseCard(isTvMode: Boolean) {
             }
             Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = "본 애플리케이션은 FFmpeg 디코더(GPL-3.0)를 포함하고 있으므로, 앱의 전체 소스코드는 본연의 라이선스 정책에 따라 [GNU General Public License v3.0] 하에 공개(오픈소스)됩니다.\n\n앱 사용자는 자유롭게 앱을 실행, 복제, 배포할 수 있으며 소스코드를 열람 및 수정할 권리가 보장됩니다. 상업적 이용 및 개작/파생 앱 개발 시 동일한 GPL-3.0 라이선스가 적용되어야 합니다.",
+                text = "본 애플리케이션은 FFmpeg 디코더(GPL-3.0)를 선택적으로 사용할 수 있도록 설계되어 있습니다.\n\nFFmpeg 코덱 바이너리(.so)는 앱에 기본 포함되어 있지 않으며, 사용자가 별도의 코덱 팩(ZIP)을 선택하여 직접 설치할 수 있습니다. 코덱을 설치하여 사용하는 경우 해당 코덱 바이너리에는 GPL-3.0 라이선스가 적용됩니다.\n\n앱의 전체 소스코드는 [GNU General Public License v3.0] 하에 공개(오픈소스)됩니다. 앱 사용자는 자유롭게 앱을 실행, 복제, 배포할 수 있으며 소스코드를 열람 및 수정할 권리가 보장됩니다.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color.White.copy(alpha = 0.8f),
                 lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.3f

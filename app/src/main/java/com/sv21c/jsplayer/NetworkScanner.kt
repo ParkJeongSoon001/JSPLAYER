@@ -10,15 +10,17 @@ import java.net.Socket
 data class DiscoveredServer(
     val ip: String,
     val hostname: String,    // NetBIOS name or IP
-    val type: String,        // "SMB" or "WEBDAV"
+    val type: String,        // "SMB", "WEBDAV", "FTP", "SFTP"
     val port: Int = 0,
     val path: String = ""    // WebDAV 기본 경로
 )
 
 /**
- * 로컬 서브넷을 스캔하여 SMB / WebDAV 서버를 검색합니다.
+ * 로컬 서브넷을 스캔하여 SMB / WebDAV / FTP / SFTP 서버를 검색합니다.
  * - SMB: TCP 445, 139 포트
  * - WebDAV: TCP 80, 8080, 5005, 5006, 8888, 2049 포트 + "/dav", "/webdav", "/" 경로 탐색
+ * - FTP: TCP 21 포트
+ * - SFTP: TCP 22 포트
  */
 object NetworkScanner {
     private const val TAG = "NetworkScanner"
@@ -154,6 +156,100 @@ object NetworkScanner {
                         }
                         break // 첫 번째 열린 포트만 사용
                     }
+                }
+                synchronized(this) {
+                    checked++
+                    onProgress((checked * 100) / total)
+                }
+            }
+            threads.add(t)
+            t.start()
+        }
+        threads.forEach { it.join() }
+        onComplete()
+    }
+
+    /**
+     * FTP 서버 검색 (TCP 21)
+     */
+    fun scanForFtp(
+        context: Context,
+        onProgress: (Int) -> Unit,
+        onFound: (DiscoveredServer) -> Unit,
+        onComplete: () -> Unit
+    ) {
+        val localIp = getLocalIpAddress(context)
+        if (localIp == null) {
+            Log.w(TAG, "Cannot determine local IP for FTP scan")
+            onComplete()
+            return
+        }
+        val prefix = subnetPrefix(localIp)
+        Log.d(TAG, "Scanning FTP on subnet ${prefix}0/24")
+
+        val total = 254
+        var checked = 0
+        val threads = mutableListOf<Thread>()
+
+        for (i in 1..254) {
+            val ip = "$prefix$i"
+            val t = Thread {
+                if (isPortOpen(ip, 21)) {
+                    val hostname = try {
+                        InetAddress.getByName(ip).hostName.also {
+                            if (it == ip) ip else it
+                        }
+                    } catch (e: Exception) { ip }
+                    val server = DiscoveredServer(ip, hostname, "FTP", 21, "ftp://$ip/")
+                    Log.d(TAG, "FTP found: $ip ($hostname)")
+                    onFound(server)
+                }
+                synchronized(this) {
+                    checked++
+                    onProgress((checked * 100) / total)
+                }
+            }
+            threads.add(t)
+            t.start()
+        }
+        threads.forEach { it.join() }
+        onComplete()
+    }
+
+    /**
+     * SFTP 서버 검색 (TCP 22)
+     */
+    fun scanForSftp(
+        context: Context,
+        onProgress: (Int) -> Unit,
+        onFound: (DiscoveredServer) -> Unit,
+        onComplete: () -> Unit
+    ) {
+        val localIp = getLocalIpAddress(context)
+        if (localIp == null) {
+            Log.w(TAG, "Cannot determine local IP for SFTP scan")
+            onComplete()
+            return
+        }
+        val prefix = subnetPrefix(localIp)
+        Log.d(TAG, "Scanning SFTP on subnet ${prefix}0/24")
+
+        val total = 254
+        var checked = 0
+        val threads = mutableListOf<Thread>()
+
+        for (i in 1..254) {
+            val ip = "$prefix$i"
+            val t = Thread {
+                if (isPortOpen(ip, 22)) {
+                    val hostname = try {
+                        InetAddress.getByName(ip).hostName.also {
+                            if (it == ip) ip else it
+                        }
+                    } catch (e: Exception) { ip }
+                    val server = DiscoveredServer(ip, hostname, "SFTP", 22, "sftp://$ip/")
+                    Log.d(TAG, "SFTP found: $ip ($hostname)")
+                    onFound(server)
                 }
                 synchronized(this) {
                     checked++

@@ -55,15 +55,28 @@ fun NetworkServerListScreen(
     var deletingCreds by remember { mutableStateOf<ServerCredentials?>(null) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
 
-    val typeLabel = if (serverType == "SMB") "SMB" else "WebDAV"
-    val accentColor = if (serverType == "SMB") Color(0xFFFF9946) else Color(0xFF63B3ED)
-    val bgGradient = if (serverType == "SMB")
-        Brush.verticalGradient(listOf(Color(0xFF1A0B00), Color(0xFF0C0500)))
-    else
-        Brush.verticalGradient(listOf(Color(0xFF00101A), Color(0xFF000508)))
+    val typeLabel = when (serverType) {
+        "SMB" -> "SMB"
+        "FTP_SFTP" -> "FTP / SFTP"
+        else -> "WebDAV"
+    }
+    val accentColor = when (serverType) {
+        "SMB" -> Color(0xFFFF9946)
+        "FTP_SFTP" -> Color(0xFF48BB78)
+        else -> Color(0xFF63B3ED)
+    }
+    val bgGradient = when (serverType) {
+        "SMB" -> Brush.verticalGradient(listOf(Color(0xFF1A0B00), Color(0xFF0C0500)))
+        "FTP_SFTP" -> Brush.verticalGradient(listOf(Color(0xFF0D1F15), Color(0xFF050F08)))
+        else -> Brush.verticalGradient(listOf(Color(0xFF00101A), Color(0xFF000508)))
+    }
 
     fun loadSaved() {
-        savedServers = CredentialStore.loadByType(context, serverType)
+        savedServers = if (serverType == "FTP_SFTP") {
+            CredentialStore.loadByType(context, "FTP") + CredentialStore.loadByType(context, "SFTP")
+        } else {
+            CredentialStore.loadByType(context, serverType)
+        }
     }
 
     fun startScan() {
@@ -73,40 +86,69 @@ fun NetworkServerListScreen(
         errorMsg = null
         coroutineScope.launch(Dispatchers.IO) {
             try {
-                if (serverType == "SMB") {
-                    NetworkScanner.scanForSmb(
-                        context = context,
-                        onProgress = { p ->
-                            coroutineScope.launch(Dispatchers.Main) { scanProgress = p }
-                        },
-                        onFound = { server ->
-                            coroutineScope.launch(Dispatchers.Main) {
-                                val alreadySaved = savedServers.any { it.host.contains(server.ip, true) }
-                                val alreadyFound = discoveredServers.any { it.ip == server.ip }
-                                if (!alreadySaved && !alreadyFound) discoveredServers.add(server)
-                            }
-                        },
-                        onComplete = {
-                            coroutineScope.launch(Dispatchers.Main) { isScanning = false }
+                when (serverType) {
+                    "SMB" -> {
+                        NetworkScanner.scanForSmb(
+                            context = context,
+                            onProgress = { p -> coroutineScope.launch(Dispatchers.Main) { scanProgress = p } },
+                            onFound = { server ->
+                                coroutineScope.launch(Dispatchers.Main) {
+                                    val alreadySaved = savedServers.any { it.host.contains(server.ip, true) }
+                                    val alreadyFound = discoveredServers.any { it.ip == server.ip }
+                                    if (!alreadySaved && !alreadyFound) discoveredServers.add(server)
+                                }
+                            },
+                            onComplete = { coroutineScope.launch(Dispatchers.Main) { isScanning = false } }
+                        )
+                    }
+                    "FTP_SFTP" -> {
+                        var scan1Done = false
+                        var scan2Done = false
+                        val checkDone = { if (scan1Done && scan2Done) coroutineScope.launch(Dispatchers.Main) { isScanning = false } }
+                        
+                        coroutineScope.launch(Dispatchers.IO) {
+                            NetworkScanner.scanForFtp(
+                                context = context,
+                                onProgress = { p -> coroutineScope.launch(Dispatchers.Main) { scanProgress = p / 2 } },
+                                onFound = { server ->
+                                    coroutineScope.launch(Dispatchers.Main) {
+                                        val alreadySaved = savedServers.any { it.host.contains(server.ip, true) }
+                                        val alreadyFound = discoveredServers.any { it.ip == server.ip && it.type == server.type }
+                                        if (!alreadySaved && !alreadyFound) discoveredServers.add(server)
+                                    }
+                                },
+                                onComplete = { scan1Done = true; checkDone() }
+                            )
                         }
-                    )
-                } else {
-                    NetworkScanner.scanForWebDav(
-                        context = context,
-                        onProgress = { p ->
-                            coroutineScope.launch(Dispatchers.Main) { scanProgress = p }
-                        },
-                        onFound = { server ->
-                            coroutineScope.launch(Dispatchers.Main) {
-                                val alreadySaved = savedServers.any { it.host.contains(server.ip, true) }
-                                val alreadyFound = discoveredServers.any { it.ip == server.ip }
-                                if (!alreadySaved && !alreadyFound) discoveredServers.add(server)
-                            }
-                        },
-                        onComplete = {
-                            coroutineScope.launch(Dispatchers.Main) { isScanning = false }
+                        coroutineScope.launch(Dispatchers.IO) {
+                            NetworkScanner.scanForSftp(
+                                context = context,
+                                onProgress = { p -> coroutineScope.launch(Dispatchers.Main) { scanProgress = 50 + p / 2 } },
+                                onFound = { server ->
+                                    coroutineScope.launch(Dispatchers.Main) {
+                                        val alreadySaved = savedServers.any { it.host.contains(server.ip, true) }
+                                        val alreadyFound = discoveredServers.any { it.ip == server.ip && it.type == server.type }
+                                        if (!alreadySaved && !alreadyFound) discoveredServers.add(server)
+                                    }
+                                },
+                                onComplete = { scan2Done = true; checkDone() }
+                            )
                         }
-                    )
+                    }
+                    else -> {
+                        NetworkScanner.scanForWebDav(
+                            context = context,
+                            onProgress = { p -> coroutineScope.launch(Dispatchers.Main) { scanProgress = p } },
+                            onFound = { server ->
+                                coroutineScope.launch(Dispatchers.Main) {
+                                    val alreadySaved = savedServers.any { it.host.contains(server.ip, true) }
+                                    val alreadyFound = discoveredServers.any { it.ip == server.ip }
+                                    if (!alreadySaved && !alreadyFound) discoveredServers.add(server)
+                                }
+                            },
+                            onComplete = { coroutineScope.launch(Dispatchers.Main) { isScanning = false } }
+                        )
+                    }
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -490,8 +532,14 @@ private fun DiscoveredServerCard(
                 modifier = Modifier.size(40.dp).background(accentColor.copy(0.15f), RoundedCornerShape(10.dp)),
                 contentAlignment = Alignment.Center
             ) {
+                val iconRes = when (server.type) {
+                    "SMB" -> Icons.Default.Storage
+                    "FTP" -> Icons.Default.Storage
+                    "SFTP" -> Icons.Default.AccountBox
+                    else -> Icons.Default.Cloud
+                }
                 Icon(
-                    if (server.type == "SMB") Icons.Default.Storage else Icons.Default.Cloud,
+                    iconRes,
                     null, tint = accentColor.copy(alpha), modifier = Modifier.size(22.dp)
                 )
             }
@@ -520,13 +568,66 @@ fun CredentialInputDialog(
     onConfirm: (ServerCredentials, Boolean) -> Unit
 ) {
     val isEditMode = editingCreds != null
-    var host by remember { mutableStateOf(prefillHost) }
+    // FTP_SFTP mode
+    val isFtpSftp = serverType == "FTP_SFTP"
+    var selectedProtocol by remember { mutableStateOf(if (isEditMode) editingCreds?.type ?: "FTP" else "FTP") }
+    
+    // IP and Port for FTP_SFTP, or just host for SMB/WebDAV
+    var host by remember { mutableStateOf("") }
+    var ip by remember { mutableStateOf("") }
+    var port by remember { mutableStateOf("") }
+
+    LaunchedEffect(prefillHost, editingCreds) {
+        if (isFtpSftp) {
+            val uri = editingCreds?.host ?: prefillHost
+            if (uri.isNotBlank()) {
+                // sftp:// 또는 ftp:// 프로토콜 자동 감지
+                if (uri.startsWith("sftp://")) {
+                    selectedProtocol = "SFTP"
+                } else if (uri.startsWith("ftp://")) {
+                    selectedProtocol = "FTP"
+                }
+                val cleaned = uri.replace("sftp://", "").replace("ftp://", "").substringBefore("/")
+                val parts = cleaned.split(":")
+                if (parts.size == 2) {
+                    ip = parts[0]
+                    port = parts[1]
+                } else if (parts.size == 1) {
+                    ip = parts[0]
+                    port = if (selectedProtocol == "SFTP") "22" else "21"
+                }
+            } else {
+                port = if (selectedProtocol == "FTP") "21" else "22"
+            }
+        } else {
+            host = editingCreds?.host ?: prefillHost
+        }
+    }
+
     var username by remember { mutableStateOf(editingCreds?.username ?: "") }
     var password by remember { mutableStateOf(editingCreds?.password ?: "") }
-    var saveCredentials by remember { mutableStateOf(isEditMode) }
+    var saveCredentials by remember { mutableStateOf(true) }
     var showPassword by remember { mutableStateOf(false) }
-    val typeLabel = if (serverType == "SMB") "SMB" else "WebDAV"
-    val accentColor = if (serverType == "SMB") Color(0xFFFF9946) else Color(0xFF63B3ED)
+
+    val actualType = if (isFtpSftp) selectedProtocol else serverType
+    val typeLabel = when(actualType) {
+        "SMB" -> "SMB"
+        "FTP" -> "FTP"
+        "SFTP" -> "SFTP"
+        else -> "WebDAV"
+    }
+    val accentColor = when(actualType) {
+        "SMB" -> Color(0xFFFF9946)
+        "FTP" -> Color(0xFF48BB78)
+        "SFTP" -> Color(0xFFF6AD55)
+        else -> Color(0xFF63B3ED)
+    }
+    val dialIcon = when(actualType) {
+        "SMB" -> Icons.Default.Storage
+        "FTP" -> Icons.Default.Storage
+        "SFTP" -> Icons.Default.AccountBox
+        else -> Icons.Default.Cloud
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -535,8 +636,7 @@ fun CredentialInputDialog(
         textContentColor = Color.White,
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(if (serverType == "SMB") Icons.Default.Storage else Icons.Default.Cloud,
-                    null, tint = accentColor, modifier = Modifier.size(20.dp))
+                Icon(dialIcon, null, tint = accentColor, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(8.dp))
                 Text(
                     if (isEditMode) "$typeLabel 서버 수정" else "$typeLabel 서버 접속",
@@ -556,20 +656,77 @@ fun CredentialInputDialog(
                     disabledBorderColor = Color.White.copy(0.15f),
                     disabledLabelColor = Color.White.copy(0.3f)
                 )
-                // 서버 주소: 수정 모드에서는 읽기 전용
-                OutlinedTextField(
-                    value = host,
-                    onValueChange = { if (!isEditMode) host = it },
-                    label = { Text("서버 주소") },
-                    placeholder = {
-                        Text(if (serverType == "SMB") "smb://192.168.0.1/" else "http://192.168.0.1:8080/",
-                            style = MaterialTheme.typography.bodySmall)
-                    },
-                    enabled = !isEditMode,
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = fieldColors
-                )
+
+                if (isFtpSftp && !isEditMode) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        // FTP 버튼
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .border(1.dp, if (selectedProtocol == "FTP") Color(0xFF48BB78) else Color.White.copy(0.3f), RoundedCornerShape(8.dp))
+                                .background(if (selectedProtocol == "FTP") Color(0xFF48BB78).copy(0.1f) else Color.Transparent)
+                                .clickable { selectedProtocol = "FTP"; port = "21" }
+                                .padding(vertical = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("FTP", color = if (selectedProtocol == "FTP") Color(0xFF48BB78) else Color.White.copy(0.6f), fontWeight = FontWeight.Bold)
+                        }
+                        // SFTP 버튼
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .border(1.dp, if (selectedProtocol == "SFTP") Color(0xFFF6AD55) else Color.White.copy(0.3f), RoundedCornerShape(8.dp))
+                                .background(if (selectedProtocol == "SFTP") Color(0xFFF6AD55).copy(0.1f) else Color.Transparent)
+                                .clickable { selectedProtocol = "SFTP"; port = "22" }
+                                .padding(vertical = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("SFTP", color = if (selectedProtocol == "SFTP") Color(0xFFF6AD55) else Color.White.copy(0.6f), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                if (isFtpSftp) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = ip,
+                            onValueChange = { ip = it },
+                            label = { Text("IP 주소 / 도메인") },
+                            placeholder = { Text("192.168.0.1", style = MaterialTheme.typography.bodySmall) },
+                            singleLine = true,
+                            modifier = Modifier.weight(0.7f),
+                            colors = fieldColors
+                        )
+                        OutlinedTextField(
+                            value = port,
+                            onValueChange = { port = it },
+                            label = { Text("포트") },
+                            placeholder = { Text(if (selectedProtocol == "FTP") "21" else "22", style = MaterialTheme.typography.bodySmall) },
+                            singleLine = true,
+                            modifier = Modifier.weight(0.3f),
+                            colors = fieldColors
+                        )
+                    }
+                } else {
+                    OutlinedTextField(
+                        value = host,
+                        onValueChange = { host = it },
+                        label = { Text("서버 주소") },
+                        placeholder = {
+                            val phText = when(serverType) {
+                                "SMB" -> "smb://192.168.0.1/"
+                                else -> "http://192.168.0.1:8080/"
+                            }
+                            Text(phText, style = MaterialTheme.typography.bodySmall)
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = fieldColors
+                    )
+                }
+
                 OutlinedTextField(value = username, onValueChange = { username = it },
                     label = { Text("사용자 이름") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth(), colors = fieldColors)
@@ -609,16 +766,22 @@ fun CredentialInputDialog(
             }
         },
         confirmButton = {
+            val isEnabled = if (isFtpSftp) ip.isNotBlank() && port.isNotBlank() else host.isNotBlank()
             TextButton(
                 onClick = {
-                    if (host.isNotBlank()) {
+                    if (isEnabled) {
+                        val finalHost = if (isFtpSftp) {
+                            "${selectedProtocol.lowercase()}://${ip}:${port}/"
+                        } else {
+                            host.trim()
+                        }
                         onConfirm(
-                            ServerCredentials(serverType, host.trim(), username.trim(), password, ""),
+                            ServerCredentials(actualType, finalHost, username.trim(), password, ""),
                             saveCredentials
                         )
                     }
                 },
-                enabled = host.isNotBlank()
+                enabled = isEnabled
             ) {
                 Text(
                     if (isEditMode) "저  장" else "접  속",

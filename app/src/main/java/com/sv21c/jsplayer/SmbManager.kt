@@ -11,7 +11,8 @@ import java.util.Properties
 data class SmbItem(
     val name: String,
     val path: String,   // smb://host/share/path/
-    val isDirectory: Boolean
+    val isDirectory: Boolean,
+    val lastModified: Long = 0L
 )
 
 object SmbManager {
@@ -50,7 +51,8 @@ object SmbManager {
                     SmbItem(
                         name = file.name.trimEnd('/'),
                         path = file.url.toString(),
-                        isDirectory = file.isDirectory
+                        isDirectory = file.isDirectory,
+                        lastModified = file.lastModified()
                     )
                 } catch (e: Exception) {
                     Log.w(TAG, "Skipping file ${file.name}: ${e.message}")

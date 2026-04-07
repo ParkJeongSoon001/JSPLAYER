@@ -11,8 +11,8 @@ android {
         applicationId = "com.sv21c.jsplayer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 106
-        versionName = "1.0.6"
+        versionCode = 108
+        versionName = "1.0.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -65,9 +65,9 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     
     // jupnp 라이브러리 (Maven Central 형식으로 변경)
-    implementation("org.jupnp:org.jupnp:3.0.3")
-    implementation("org.jupnp:org.jupnp.support:3.0.3")
-    implementation("org.jupnp:org.jupnp.android:3.0.3")
+    implementation("org.jupnp:org.jupnp:3.0.4")
+    implementation("org.jupnp:org.jupnp.support:3.0.4")
+    implementation("org.jupnp:org.jupnp.android:3.0.4")
     // jupnp는 servlet-api 등을 필요로 할 수 있습니다. (직접 선언)
     implementation("jakarta.xml.ws:jakarta.xml.ws-api:4.0.3")
     implementation("jakarta.xml.bind:jakarta.xml.bind-api:4.0.5")
@@ -84,6 +84,7 @@ dependencies {
     val media3_version = "1.5.0"
     implementation("androidx.media3:media3-exoplayer:$media3_version")
     implementation("androidx.media3:media3-ui:$media3_version")
+    implementation("androidx.media3:media3-session:$media3_version")
     implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.5.0+1")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 
@@ -96,6 +97,15 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // 암호화 저장 (EncryptedSharedPreferences)
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+    // ── FTP / SFTP 지원 ──────────────────────────────────────────
+    // FTP 클라이언트 (Apache Commons Net)
+    implementation("commons-net:commons-net:3.11.1")
+    // SFTP 클라이언트 (SSHJ)
+    implementation("com.hierynomus:sshj:0.39.0")
+    // Bouncy Castle (X25519 등 최신 암호 알고리즘 지원)
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
