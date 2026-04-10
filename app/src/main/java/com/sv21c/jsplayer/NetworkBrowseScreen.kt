@@ -21,6 +21,8 @@ import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -61,6 +63,8 @@ fun NetworkBrowseScreen(
     val listState = rememberLazyListState()
     val context = LocalContext.current
     var showSortMenu by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var isSearchActive by remember { mutableStateOf(false) }
     
     val primaryColor = MaterialTheme.colorScheme.primary
     val secondaryColor = MaterialTheme.colorScheme.secondary
@@ -122,6 +126,8 @@ fun NetworkBrowseScreen(
 
     LaunchedEffect(currentPath) {
         customPath = currentPath
+        searchQuery = ""
+        isSearchActive = false
         loadPath(currentPath)
     }
 
@@ -132,19 +138,36 @@ fun NetworkBrowseScreen(
     ) {
         TopAppBar(
             title = {
-                Column {
-                    Text(
-                        text = currentPathName,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                if (isSearchActive) {
+                    androidx.compose.material3.TextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("이름 검색...", style = MaterialTheme.typography.bodyMedium) },
+                        textStyle = MaterialTheme.typography.bodyMedium,
+                        singleLine = true,
+                        colors = androidx.compose.material3.TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        )
                     )
-                    Text(
-                        text = sortOrder.displayName,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                } else {
+                    Column {
+                        Text(
+                            text = currentPathName,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = sortOrder.displayName,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             },
             navigationIcon = {
@@ -154,6 +177,18 @@ fun NetworkBrowseScreen(
                 }
             },
             actions = {
+                if (isSearchActive) {
+                    IconButton(onClick = { 
+                        searchQuery = ""
+                        isSearchActive = false 
+                    }) {
+                        Icon(Icons.Default.Close, contentDescription = "닫기", tint = MaterialTheme.colorScheme.onBackground)
+                    }
+                } else {
+                    IconButton(onClick = { isSearchActive = true }) {
+                        Icon(Icons.Default.Search, contentDescription = "검색", tint = MaterialTheme.colorScheme.onBackground)
+                    }
+                }
                 Box {
                     IconButton(onClick = { showSortMenu = true }) {
                         Icon(Icons.Default.Sort, contentDescription = "정렬", tint = MaterialTheme.colorScheme.onBackground)
@@ -225,8 +260,16 @@ fun NetworkBrowseScreen(
                 Text("이 폴더는 비어 있습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             else -> {
-                val sortedItems = remember(items, sortOrder) {
-                    items.sortedWith { o1, o2 ->
+                val sortedItems = remember(items, sortOrder, searchQuery) {
+                    val filtered = if (searchQuery.isNotEmpty()) {
+                        items.filter { 
+                            val name = when(it) { is SmbItem -> it.name; is WebDavItem -> it.name; is FtpItem -> it.name; is SftpItem -> it.name; else -> "" }
+                            name.contains(searchQuery, ignoreCase = true)
+                        }
+                    } else {
+                        items
+                    }
+                    filtered.sortedWith { o1, o2 ->
                         val isDir1 = when(o1) { is SmbItem -> o1.isDirectory; is WebDavItem -> o1.isDirectory; is FtpItem -> o1.isDirectory; is SftpItem -> o1.isDirectory; else -> true }
                         val isDir2 = when(o2) { is SmbItem -> o2.isDirectory; is WebDavItem -> o2.isDirectory; is FtpItem -> o2.isDirectory; is SftpItem -> o2.isDirectory; else -> true }
 

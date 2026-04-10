@@ -100,15 +100,29 @@ fun LicensePolicyScreen(
                         accentColor = Color(0xFF34D399)
                     ),
                     LibraryLicense(
-                        name = "AndroidX (Core, Compose, Media3)",
-                        description = "안드로이드 기본 UI 및 미디어 프레임워크",
+                        name = "Apache Commons Net",
+                        description = "FTP 네트워크 프로토콜 클라이언트",
+                        license = "Apache License 2.0",
+                        url = "https://commons.apache.org/proper/commons-net/",
+                        accentColor = Color(0xFFF6E05E)
+                    ),
+                    LibraryLicense(
+                        name = "SSHJ",
+                        description = "SFTP 네트워크 프로토콜 클라이언트",
+                        license = "Apache License 2.0",
+                        url = "https://github.com/hierynomus/sshj",
+                        accentColor = Color(0xFF9F7AEA)
+                    ),
+                    LibraryLicense(
+                        name = "AndroidX (Core, Compose, Media3, Security)",
+                        description = "안드로이드 기본 UI, 미디어, 보안 프레임워크",
                         license = "Apache License 2.0",
                         url = "https://developer.android.com/jetpack",
                         accentColor = Color(0xFF34D399)
                     ),
                     LibraryLicense(
-                        name = "OkHttp, SLF4J, Jetty, Jakarta XML",
-                        description = "네트워크, 서버, 로깅 유틸리티",
+                        name = "OkHttp, SLF4J, Jetty, Jakarta, BouncyCastle",
+                        description = "네트워크, 서버, 로깅, 암호화 유틸리티",
                         license = "Apache 2.0, MIT, EPL 1.0/2.0",
                         url = "-",
                         accentColor = Color(0xFF34D399)
@@ -145,7 +159,7 @@ fun AppLicenseCard(isTvMode: Boolean) {
                 Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFFD280FF))
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "SV PLAYER 라이선스 고지문 (GPL-3.0)",
+                    text = "SVC PLAYER 라이선스 고지문 (GPL-3.0)",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = Color.White

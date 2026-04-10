@@ -23,5 +23,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "SVPLAYER"
+rootProject.name = "SVC PLAYER"
 include(":app")

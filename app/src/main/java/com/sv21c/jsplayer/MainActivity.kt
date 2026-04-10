@@ -13,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.AccountBox
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.PlayArrow
@@ -94,6 +95,7 @@ sealed class ScreenState {
     object Home : ScreenState()
     object ServerList : ScreenState()
     object LicensePolicy : ScreenState()
+    object Settings : ScreenState()
     data class Browsing(
         val device: Device<*, *, *>,
         val currentContainerId: String,
@@ -559,6 +561,9 @@ class MainActivity : ComponentActivity() {
                                 screenState = ScreenState.ServerList
                             }
                         }
+                        is ScreenState.Settings -> {
+                            screenState = ScreenState.Home
+                        }
                         is ScreenState.LicensePolicy -> {
                             screenState = ScreenState.Home
                         }
@@ -607,6 +612,9 @@ class MainActivity : ComponentActivity() {
                     when (screenState) {
                         is ScreenState.Home -> {
                             showExitDialog = true
+                        }
+                        is ScreenState.Settings -> {
+                            screenState = ScreenState.Home
                         }
                         is ScreenState.LicensePolicy -> {
                             screenState = ScreenState.Home
@@ -849,10 +857,17 @@ class MainActivity : ComponentActivity() {
                                     networkBrowsingCredentials = null
                                     screenState = ScreenState.FtpSftpServerList()
                                 },
+                                onSettingsClick = { screenState = ScreenState.Settings },
                                 onLicenseClick = { screenState = ScreenState.LicensePolicy },
                                 isTvMode = isTvMode,
                                 onZipClick = { codecZipPickerLauncher.launch("application/zip") },
                                 codecInstallResultMessage = codecInstallResultMessage.value
+                            )
+                        }
+                        is ScreenState.Settings -> {
+                            PassthroughSettingsScreen(
+                                isTvMode = isTvMode,
+                                onBackClick = { triggerBack() }
                             )
                         }
                         is ScreenState.LicensePolicy -> {
@@ -1849,9 +1864,16 @@ fun BrowseScreen(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var sortMenuExpanded by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var isSearchActive by remember { mutableStateOf(false) }
 
-    val sortedItems = remember(items, sortOrder) {
-        items.sortedWith { o1, o2 ->
+    val sortedItems = remember(items, sortOrder, searchQuery) {
+        val filtered = if (searchQuery.isNotEmpty()) {
+            items.filter { (it.title ?: "").contains(searchQuery, ignoreCase = true) }
+        } else {
+            items
+        }
+        filtered.sortedWith { o1, o2 ->
             val isDir1 = o1 is Container
             val isDir2 = o2 is Container
 
@@ -1889,19 +1911,36 @@ fun BrowseScreen(
     ) {
         TopAppBar(
             title = { 
-                Column {
-                    Text(
-                        text = state.containerName,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                if (isSearchActive) {
+                    androidx.compose.material3.TextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("이름 검색...", style = MaterialTheme.typography.bodyMedium) },
+                        textStyle = MaterialTheme.typography.bodyMedium,
+                        singleLine = true,
+                        colors = androidx.compose.material3.TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        )
                     )
-                    Text(
-                        text = sortOrder.displayName,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                } else {
+                    Column {
+                        Text(
+                            text = state.containerName,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = sortOrder.displayName,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             },
             navigationIcon = {
@@ -1910,6 +1949,19 @@ fun BrowseScreen(
                 }
             },
             actions = {
+                if (isSearchActive) {
+                    IconButton(onClick = { 
+                        searchQuery = ""
+                        isSearchActive = false 
+                    }) {
+                        Icon(Icons.Default.Close, contentDescription = "닫기", tint = MaterialTheme.colorScheme.onBackground)
+                    }
+                } else {
+                    IconButton(onClick = { isSearchActive = true }) {
+                        Icon(Icons.Default.Search, contentDescription = "검색", tint = MaterialTheme.colorScheme.onBackground)
+                    }
+                }
+
                 // 정렬 메뉴 추가
                 Box {
                     IconButton(onClick = { sortMenuExpanded = true }) {
@@ -2333,8 +2385,14 @@ fun VideoPlayerScreen(
 
     // --- ExoPlayer ---
     val exoPlayer = remember {
+        val passthroughEnabled = SettingsStore.getAudioPassthroughEnabled(context)
+        val extensionMode = if (passthroughEnabled) {
+            DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+        } else {
+            DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+        }
         val renderersFactory = DefaultRenderersFactory(context)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            .setExtensionRendererMode(extensionMode)
             
         var finalVideoUrl = videoUrl
         val httpDataSourceFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
@@ -3291,28 +3349,46 @@ fun LocalBrowserScreen(
     var isLoading by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var sortMenuExpanded by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var isSearchActive by remember { mutableStateOf(false) }
     
     val context = androidx.compose.ui.platform.LocalContext.current
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
     // 폴더 목록 추출 (videos가 바뀔 때마다 계산)
-    val folders = remember(videos) {
-        videos.mapNotNull { it.path?.substringBeforeLast("/") }
+    val folders = remember(videos, searchQuery) {
+        val baseFolders = videos.mapNotNull { it.path?.substringBeforeLast("/") }
             .distinct()
             .map { fullPath -> 
                 val name = fullPath.substringAfterLast("/")
                 name to fullPath
             }
-            .sortedBy { it.first.lowercase() }
+        
+        if (searchQuery.isNotEmpty()) {
+            baseFolders.filter { it.first.contains(searchQuery, ignoreCase = true) }
+                .sortedBy { it.first.lowercase() }
+        } else {
+            baseFolders.sortedBy { it.first.lowercase() }
+        }
     }
 
     // 현재 뷰모드와 선택된 폴더에 따라 보여줄 목록 필터링
-    val displayVideos = remember(videos, viewMode, selectedFolder) {
-        if (viewMode == LocalViewMode.FOLDERS && selectedFolder != null) {
+    val displayVideos = remember(videos, viewMode, selectedFolder, searchQuery) {
+        val base = if (viewMode == LocalViewMode.FOLDERS && selectedFolder != null) {
             videos.filter { it.path?.startsWith(selectedFolder) == true }
         } else {
             videos
         }
+        if (searchQuery.isNotEmpty()) {
+            base.filter { it.title.contains(searchQuery, ignoreCase = true) }
+        } else {
+            base
+        }
+    }
+
+    LaunchedEffect(viewMode, selectedFolder) {
+        searchQuery = ""
+        isSearchActive = false
     }
 
     LaunchedEffect(displayVideos, isLoading) {
@@ -3394,21 +3470,38 @@ fun LocalBrowserScreen(
     ) {
         TopAppBar(
             title = { 
-                Column {
-                    Text(
-                        text = if (viewMode == LocalViewMode.ALL_VIDEOS) "로컬 동영상 (전체)" 
-                               else if (selectedFolder == null) "로컬 동영상 (폴더별)"
-                               else "폴더: ${selectedFolder.substringAfterLast("/")}",
-                        color = MaterialTheme.colorScheme.onBackground,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                if (isSearchActive) {
+                    androidx.compose.material3.TextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("이름 검색...", style = MaterialTheme.typography.bodyMedium) },
+                        textStyle = MaterialTheme.typography.bodyMedium,
+                        singleLine = true,
+                        colors = androidx.compose.material3.TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        )
                     )
-                    Text(
-                        text = sortOrder.displayName,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                } else {
+                    Column {
+                        Text(
+                            text = if (viewMode == LocalViewMode.ALL_VIDEOS) "로컬 동영상 (전체)" 
+                                   else if (selectedFolder == null) "로컬 동영상 (폴더별)"
+                                   else "폴더: ${selectedFolder?.substringAfterLast("/")}",
+                            color = MaterialTheme.colorScheme.onBackground,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = sortOrder.displayName,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             },
             navigationIcon = {
@@ -3417,6 +3510,19 @@ fun LocalBrowserScreen(
                 }
             },
             actions = {
+                if (isSearchActive) {
+                    IconButton(onClick = { 
+                        searchQuery = ""
+                        isSearchActive = false 
+                    }) {
+                        Icon(Icons.Default.Close, contentDescription = "닫기", tint = MaterialTheme.colorScheme.onBackground)
+                    }
+                } else {
+                    IconButton(onClick = { isSearchActive = true }) {
+                        Icon(Icons.Default.Search, contentDescription = "검색", tint = MaterialTheme.colorScheme.onBackground)
+                    }
+                }
+
                 // 뷰 모드 전환 버튼
                 IconButton(onClick = {
                     onViewModeChange(
@@ -3689,6 +3795,7 @@ fun HomeScreen(
     onSmbClick: () -> Unit = {},
     onWebDavClick: () -> Unit = {},
     onFtpSftpClick: () -> Unit = {},
+    onSettingsClick: () -> Unit = {},
     onLicenseClick: () -> Unit = {},
     isTvMode: Boolean = false,
     onZipClick: () -> Unit = {},
@@ -3781,7 +3888,7 @@ fun HomeScreen(
                     modifier = Modifier.padding(bottom = 24.dp)
                 ) {
                     Text(
-                        text = "SV PLAYER",
+                        text = "SVC PLAYER",
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
                         color = Color.White
@@ -4186,7 +4293,8 @@ fun HomeScreen(
                 // 안내 및 라이선스 정책 버튼
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                 ) {
                     var showCodecDialog by remember { mutableStateOf(false) }
                     
@@ -4211,7 +4319,8 @@ fun HomeScreen(
                             .background(
                                 color = if (isCodecFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
                                 shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
-                            )
+                            ),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
                     ) {
                         Text(
                             text = "[추가 코덱 설치 안내]",
@@ -4221,7 +4330,29 @@ fun HomeScreen(
                         )
                     }
 
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(2.dp))
+
+                    var isSettingsFocused by remember { mutableStateOf(false) }
+                    TextButton(
+                        onClick = onSettingsClick,
+                        modifier = Modifier
+                            .onFocusChanged { isSettingsFocused = it.isFocused }
+                            .focusable()
+                            .background(
+                                color = if (isSettingsFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
+                                shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                            ),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                    ) {
+                        Text(
+                            text = "[오디오 설정]",
+                            color = if (isSettingsFocused) Color.White else Color(0xFF94A3B8),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(2.dp))
 
                     var isLicenseFocused by remember { mutableStateOf(false) }
                     TextButton(
@@ -4232,7 +4363,8 @@ fun HomeScreen(
                             .background(
                                 color = if (isLicenseFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
                                 shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
-                            )
+                            ),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
                     ) {
                         Text(
                             text = "[오픈소스 라이선스 정책]",
@@ -4290,7 +4422,7 @@ fun CodecInstallDialog(
                     )
                 } else {
                     Text(
-                        text = "추가 코덱이 설치가 되어 있지 않습니다. 아래 버튼 눌러서 코덱이 있는 Zip 파일을 선택 완료 하시면 설치 됩니다.",
+                        text = "추가 코덱이 설치가 되어 있지 않습니다. 아래 버튼 눌러서 코덱이 있는 Zip 파일을 선택 완료 하시면 설치 됩니다.\n(Zip 파일 설치후 앱 종료 후 다시 실행하세요)",
                         style = MaterialTheme.typography.bodyMedium,
                         color = Color.White.copy(alpha = 0.9f),
                         lineHeight = 22.sp
@@ -4382,3 +4514,114 @@ fun CodecInstallDialog(
     }
 }
 
+@Composable
+fun PassthroughSettingsScreen(
+    isTvMode: Boolean,
+    onBackClick: () -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var isPassthroughEnabled by remember { mutableStateOf(SettingsStore.getAudioPassthroughEnabled(context)) }
+    
+    // UI elements
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Color(0xFF0C1122), Color(0xFF05070F))))
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Header
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(if (isTvMode) 32.dp else 16.dp),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                var isBackFocused by remember { mutableStateOf(false) }
+                IconButton(
+                    onClick = onBackClick,
+                    modifier = Modifier
+                        .onFocusChanged { isBackFocused = it.isFocused }
+                        .focusable()
+                        .background(
+                            color = if (isBackFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                        )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ArrowBack,
+                        contentDescription = "뒤로가기",
+                        tint = if (isBackFocused) Color.White else Color(0xFF94A3B8)
+                    )
+                }
+                Text(
+                    text = "오디오 패스스루 설정",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(start = 16.dp)
+                )
+            }
+
+            // Setting Item
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = if (isTvMode) 32.dp else 16.dp)
+                    .padding(top = 16.dp)
+                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                    .background(Color.White.copy(alpha = 0.05f))
+                    .border(
+                        width = 1.dp,
+                        color = Color.White.copy(alpha = 0.1f),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+                    )
+            ) {
+                var isRowFocused by remember { mutableStateOf(false) }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { isRowFocused = it.isFocused }
+                        .focusable()
+                        .clickable {
+                            val newVal = !isPassthroughEnabled
+                            isPassthroughEnabled = newVal
+                            SettingsStore.saveAudioPassthroughEnabled(context, newVal)
+                        }
+                        .background(if (isRowFocused) Color.White.copy(alpha = 0.15f) else Color.Transparent)
+                        .padding(20.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "하드웨어 오디오 패스스루 사용",
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "기본값은 OFF입니다. 설정 시 비디오 오디오(DTS/AC3 등)를 디코딩하지 않고 외부 하드웨어(사운드바, AV 리시버 등)로 원본 형태로 전송(패스스루)합니다. 호환되지 않는 기기인 경우 오디오가 재생되지 않을 수 있습니다.",
+                            color = Color.White.copy(alpha = 0.6f),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Switch(
+                        checked = isPassthroughEnabled,
+                        onCheckedChange = { newVal ->
+                            isPassthroughEnabled = newVal
+                            SettingsStore.saveAudioPassthroughEnabled(context, newVal)
+                        },
+                        modifier = Modifier.padding(start = 16.dp),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Color(0xFF8B5CF6),
+                            uncheckedThumbColor = Color(0xFF94A3B8),
+                            uncheckedTrackColor = Color(0xFF334155)
+                        )
+                    )
+                }
+            }
+        }
+    }
+}
