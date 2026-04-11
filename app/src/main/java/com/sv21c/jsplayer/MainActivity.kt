@@ -4316,6 +4316,12 @@ fun HomeScreen(
                         modifier = Modifier
                             .onFocusChanged { isCodecFocused = it.isFocused }
                             .focusable()
+                            .onKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                    showCodecDialog = true
+                                    true
+                                } else false
+                            }
                             .background(
                                 color = if (isCodecFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
                                 shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
@@ -4338,6 +4344,12 @@ fun HomeScreen(
                         modifier = Modifier
                             .onFocusChanged { isSettingsFocused = it.isFocused }
                             .focusable()
+                            .onKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                    onSettingsClick()
+                                    true
+                                } else false
+                            }
                             .background(
                                 color = if (isSettingsFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
                                 shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
@@ -4360,6 +4372,12 @@ fun HomeScreen(
                         modifier = Modifier
                             .onFocusChanged { isLicenseFocused = it.isFocused }
                             .focusable()
+                            .onKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                    onLicenseClick()
+                                    true
+                                } else false
+                            }
                             .background(
                                 color = if (isLicenseFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
                                 shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
@@ -4467,6 +4485,12 @@ fun CodecInstallDialog(
                         modifier = Modifier
                             .onFocusChanged { isZipFocused = it.isFocused }
                             .focusable()
+                            .onKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                    onZipClick()
+                                    true
+                                } else false
+                            }
                             .border(
                                 width = if (isZipFocused) 2.dp else 0.dp,
                                 color = if (isZipFocused) Color.White else Color.Transparent,
@@ -4497,6 +4521,12 @@ fun CodecInstallDialog(
                         modifier = Modifier
                             .onFocusChanged { isFocused = it.isFocused }
                             .focusable()
+                            .onKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                    onDismiss()
+                                    true
+                                } else false
+                            }
                             .border(
                                 width = if (isFocused) 2.dp else 0.dp,
                                 color = if (isFocused) Color.White else Color.Transparent,
@@ -4542,6 +4572,12 @@ fun PassthroughSettingsScreen(
                     modifier = Modifier
                         .onFocusChanged { isBackFocused = it.isFocused }
                         .focusable()
+                        .onKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                onBackClick()
+                                true
+                            } else false
+                        }
                         .background(
                             color = if (isBackFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
                             shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
@@ -4582,6 +4618,14 @@ fun PassthroughSettingsScreen(
                         .fillMaxWidth()
                         .onFocusChanged { isRowFocused = it.isFocused }
                         .focusable()
+                        .onKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                val newVal = !isPassthroughEnabled
+                                isPassthroughEnabled = newVal
+                                SettingsStore.saveAudioPassthroughEnabled(context, newVal)
+                                true
+                            } else false
+                        }
                         .clickable {
                             val newVal = !isPassthroughEnabled
                             isPassthroughEnabled = newVal

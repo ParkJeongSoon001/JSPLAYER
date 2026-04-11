@@ -40,8 +40,28 @@ fun LicensePolicyScreen(
             TopAppBar(
                 title = { Text("오픈소스 라이선스 정책", color = Color.White, fontWeight = FontWeight.Bold) },
                 navigationIcon = {
-                    IconButton(onClick = onBackClick) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
+                    var isBackFocused by remember { mutableStateOf(false) }
+                    IconButton(
+                        onClick = onBackClick,
+                        modifier = Modifier
+                            .onFocusChanged { isBackFocused = it.isFocused }
+                            .focusable()
+                            .onKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                    onBackClick()
+                                    true
+                                } else false
+                            }
+                            .background(
+                                color = if (isBackFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowBack,
+                            contentDescription = "Back",
+                            tint = if (isBackFocused) Color.White else Color.White.copy(alpha = 0.7f)
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
