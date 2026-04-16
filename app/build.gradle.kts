@@ -11,8 +11,8 @@ android {
         applicationId = "com.sv21c.jsplayer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 112
-        versionName = "1.1.2"
+        versionCode = 113
+        versionName = "1.1.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -106,6 +106,24 @@ dependencies {
     // Bouncy Castle (X25519 등 최신 암호 알고리즘 지원)
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
+
+    // ── DLNA 캐스팅 (로컬 HTTP 서버) ─────────────────────────────
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
+
+    // ── Google Drive API 지원 ────────────────────────────────────
+    implementation("com.google.android.gms:play-services-auth:21.1.1")
+    implementation("com.google.apis:google-api-services-drive:v3-rev20240123-2.0.0") {
+        exclude(group = "org.apache.httpcomponents")
+    }
+    implementation("com.google.api-client:google-api-client-android:2.2.0") {
+        exclude(group = "org.apache.httpcomponents")
+    }
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
+
+    // ── OneDrive (Microsoft Graph) 지원 ─────────────────────────
+    implementation("com.microsoft.identity.client:msal:5.+") {
+        exclude(group = "com.microsoft.device.display")
+    }
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

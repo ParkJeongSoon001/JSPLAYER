@@ -388,8 +388,10 @@ private fun SavedServerCard(
             .onFocusChanged { isFocused = it.hasFocus }
             .focusable()
             .onKeyEvent { e ->
-                if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionCenter) { onConnect(); true }
-                else if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight) {
+                if (e.key == Key.DirectionCenter || e.key == Key.Enter) {
+                    if (e.type == KeyEventType.KeyDown) onConnect()
+                    true
+                } else if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight) {
                     try { editFocusRequester.requestFocus() } catch (_: Exception) {}
                     true
                 } else false
@@ -433,17 +435,14 @@ private fun SavedServerCard(
                     .onFocusChanged { isEditFocused = it.isFocused }
                     .focusable()
                     .onKeyEvent { e ->
-                        when {
-                            e.type == KeyEventType.KeyDown && e.key == Key.DirectionCenter -> { onEdit(); true }
-                            e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight -> {
-                                try { deleteFocusRequester.requestFocus() } catch (_: Exception) {}
-                                true
-                            }
-                            e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft -> {
-                                // 카드 자체로 포커스 이동은 자연스럽게 처리됨
-                                false
-                            }
-                            else -> false
+                        if (e.key == Key.DirectionCenter || e.key == Key.Enter) {
+                            if (e.type == KeyEventType.KeyDown) onEdit()
+                            true
+                        } else if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight) {
+                            try { deleteFocusRequester.requestFocus() } catch (_: Exception) {}
+                            true
+                        } else {
+                            false
                         }
                     }
                     .clickable { onEdit() },
@@ -471,13 +470,14 @@ private fun SavedServerCard(
                     .onFocusChanged { isDeleteFocused = it.isFocused }
                     .focusable()
                     .onKeyEvent { e ->
-                        when {
-                            e.type == KeyEventType.KeyDown && e.key == Key.DirectionCenter -> { onDelete(); true }
-                            e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft -> {
-                                try { editFocusRequester.requestFocus() } catch (_: Exception) {}
-                                true
-                            }
-                            else -> false
+                        if (e.key == Key.DirectionCenter || e.key == Key.Enter) {
+                            if (e.type == KeyEventType.KeyDown) onDelete()
+                            true
+                        } else if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft) {
+                            try { editFocusRequester.requestFocus() } catch (_: Exception) {}
+                            true
+                        } else {
+                            false
                         }
                     }
                     .clickable { onDelete() },
@@ -608,6 +608,7 @@ fun CredentialInputDialog(
     var password by remember { mutableStateOf(editingCreds?.password ?: "") }
     var saveCredentials by remember { mutableStateOf(true) }
     var showPassword by remember { mutableStateOf(false) }
+    var selectedEncoding by remember { mutableStateOf(editingCreds?.encoding ?: "AUTO") }
 
     val actualType = if (isFtpSftp) selectedProtocol else serverType
     val typeLabel = when(actualType) {
@@ -727,6 +728,9 @@ fun CredentialInputDialog(
                     )
                 }
 
+
+
+
                 OutlinedTextField(value = username, onValueChange = { username = it },
                     label = { Text("사용자 이름") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth(), colors = fieldColors)
@@ -776,7 +780,7 @@ fun CredentialInputDialog(
                             host.trim()
                         }
                         onConfirm(
-                            ServerCredentials(actualType, finalHost, username.trim(), password, ""),
+                            ServerCredentials(actualType, finalHost, username.trim(), password, "", selectedEncoding),
                             saveCredentials
                         )
                     }

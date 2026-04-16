@@ -416,6 +416,14 @@ class MyUpnpService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        
+        // --- JUPNP BUG FIX: Prevent JettyStreamClient NPE from crashing the app ---
+        val currentHandler = Thread.getDefaultUncaughtExceptionHandler()
+        if (currentHandler !is JupnpBugExceptionHandler) {
+            Thread.setDefaultUncaughtExceptionHandler(JupnpBugExceptionHandler(currentHandler))
+        }
+        // --------------------------------------------------------------------------
+        
         try {
             // Force IPv4 via system properties
             System.setProperty("java.net.preferIPv4Stack", "true")
@@ -456,5 +464,30 @@ class MyUpnpService : Service() {
             Log.e("DLNAManager", "Error during JUPnP shutdown", e)
         }
         super.onDestroy()
+    }
+}
+
+class JupnpBugExceptionHandler(
+    private val defaultHandler: Thread.UncaughtExceptionHandler?
+) : Thread.UncaughtExceptionHandler {
+    override fun uncaughtException(t: Thread, e: Throwable) {
+        var isJupnpBug = false
+        var cause: Throwable? = e
+        while (cause != null) {
+            if (cause is NullPointerException) {
+                val elements = cause.stackTrace
+                if (elements.any { it.className.contains("JettyStreamClientImpl") && it.methodName == "logExecutionException" }) {
+                    isJupnpBug = true
+                    break
+                }
+            }
+            cause = cause.cause
+        }
+        
+        if (isJupnpBug) {
+            Log.e("DLNAManager", "Ignored jUPnP Jetty NPE bug in background thread: ${t.name}")
+        } else {
+            defaultHandler?.uncaughtException(t, e)
+        }
     }
 }

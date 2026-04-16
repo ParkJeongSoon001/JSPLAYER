@@ -1,5 +1,6 @@
 package com.sv21c.jsplayer
 
+import android.content.Context
 import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -51,8 +52,8 @@ fun NetworkBrowseScreen(
     sortOrder: SortOrder,
     onSortOrderChange: (SortOrder) -> Unit,
     onBackClick: () -> Unit,
-    onFolderClick: (path: String, name: String) -> Unit,
-    onVideoClick: (url: String, title: String, subUrl: String?, subExt: String?, playlist: List<PlaylistItem>, currentIndex: Int) -> Unit
+    onFolderClick: (String, String) -> Unit,
+    onVideoClick: (url: String, title: String, subUrl: String?, subExt: String?, playlist: List<PlaylistItem>, currentIndex: Int, httpHeaders: Map<String, String>) -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
     var items by remember(currentPath) { mutableStateOf<List<Any>>(emptyList()) }
@@ -73,6 +74,7 @@ fun NetworkBrowseScreen(
         "WEBDAV" -> Color(0xFF63B3ED)
         "FTP" -> Color(0xFF48BB78)   // 초록
         "SFTP" -> Color(0xFFF6AD55)  // 주황
+        "ONEDRIVE" -> Color(0xFF0078D4)  // 마이크로소프트 블루
         else -> Color(0xFF63B3ED)
     }
 
@@ -90,7 +92,7 @@ fun NetworkBrowseScreen(
                         val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
                         val ftpHost = uri?.host ?: credentials.host.removePrefix("ftp://").split("/")[0].split(":")[0]
                         val ftpPort = uri?.port?.takeIf { it > 0 } ?: 21
-                        FtpManager.listFiles(ftpHost, ftpPort, credentials.username, credentials.password, path)
+                        FtpManager.listFiles(ftpHost, ftpPort, credentials.username, credentials.password, path, credentials.encoding)
                             .map { list -> list as List<Any> }
                     }
                     "SFTP" -> {
@@ -98,6 +100,20 @@ fun NetworkBrowseScreen(
                         val sftpHost = uri?.host ?: credentials.host.removePrefix("sftp://").split("/")[0].split(":")[0]
                         val sftpPort = uri?.port?.takeIf { it > 0 } ?: 22
                         SftpManager.listFiles(sftpHost, sftpPort, credentials.username, credentials.password, path)
+                            .map { list -> list as List<Any> }
+                    }
+                    "GOOGLE_DRIVE" -> {
+                        // username 필드에 저장된 이메일을 사용하여 계정 검색
+                        val account = kotlinx.coroutines.withContext(Dispatchers.Main) { GoogleDriveAuthManager.getSignedInAccount(context) }
+                        if (account != null) {
+                            GoogleDriveManager.listFiles(context, account, path)
+                                .map { list -> list as List<Any> }
+                        } else {
+                            Result.failure(Exception("Google Drive 계정 인증이 필요합니다."))
+                        }
+                    }
+                    "ONEDRIVE" -> {
+                        OneDriveManager.listFiles(path)
                             .map { list -> list as List<Any> }
                     }
                     else -> Result.failure(Exception("지원하지 않는 프로토콜: ${credentials.type}"))
@@ -263,23 +279,23 @@ fun NetworkBrowseScreen(
                 val sortedItems = remember(items, sortOrder, searchQuery) {
                     val filtered = if (searchQuery.isNotEmpty()) {
                         items.filter { 
-                            val name = when(it) { is SmbItem -> it.name; is WebDavItem -> it.name; is FtpItem -> it.name; is SftpItem -> it.name; else -> "" }
+                            val name = when(it) { is SmbItem -> it.name; is WebDavItem -> it.name; is FtpItem -> it.name; is SftpItem -> it.name; is OneDriveItem -> it.name; else -> "" }
                             name.contains(searchQuery, ignoreCase = true)
                         }
                     } else {
                         items
                     }
                     filtered.sortedWith { o1, o2 ->
-                        val isDir1 = when(o1) { is SmbItem -> o1.isDirectory; is WebDavItem -> o1.isDirectory; is FtpItem -> o1.isDirectory; is SftpItem -> o1.isDirectory; else -> true }
-                        val isDir2 = when(o2) { is SmbItem -> o2.isDirectory; is WebDavItem -> o2.isDirectory; is FtpItem -> o2.isDirectory; is SftpItem -> o2.isDirectory; else -> true }
+                        val isDir1 = when(o1) { is SmbItem -> o1.isDirectory; is WebDavItem -> o1.isDirectory; is FtpItem -> o1.isDirectory; is SftpItem -> o1.isDirectory; is OneDriveItem -> o1.isDirectory; else -> true }
+                        val isDir2 = when(o2) { is SmbItem -> o2.isDirectory; is WebDavItem -> o2.isDirectory; is FtpItem -> o2.isDirectory; is SftpItem -> o2.isDirectory; is OneDriveItem -> o2.isDirectory; else -> true }
 
                         if (isDir1 && !isDir2) -1
                         else if (!isDir1 && isDir2) 1
                         else {
-                            val name1 = when(o1) { is SmbItem -> o1.name; is WebDavItem -> o1.name; is FtpItem -> o1.name; is SftpItem -> o1.name; else -> "" }
-                            val name2 = when(o2) { is SmbItem -> o2.name; is WebDavItem -> o2.name; is FtpItem -> o2.name; is SftpItem -> o2.name; else -> "" }
-                            val time1 = when(o1) { is SmbItem -> o1.lastModified; is WebDavItem -> o1.lastModified; is FtpItem -> o1.lastModified; is SftpItem -> o1.lastModified; else -> 0L }
-                            val time2 = when(o2) { is SmbItem -> o2.lastModified; is WebDavItem -> o2.lastModified; is FtpItem -> o2.lastModified; is SftpItem -> o2.lastModified; else -> 0L }
+                            val name1 = when(o1) { is SmbItem -> o1.name; is WebDavItem -> o1.name; is FtpItem -> o1.name; is SftpItem -> o1.name; is OneDriveItem -> o1.name; else -> "" }
+                            val name2 = when(o2) { is SmbItem -> o2.name; is WebDavItem -> o2.name; is FtpItem -> o2.name; is SftpItem -> o2.name; is OneDriveItem -> o2.name; else -> "" }
+                            val time1 = when(o1) { is SmbItem -> o1.lastModified; is WebDavItem -> o1.lastModified; is FtpItem -> o1.lastModified; is SftpItem -> o1.lastModified; is OneDriveItem -> (o1.lastModified ?: 0L); else -> 0L }
+                            val time2 = when(o2) { is SmbItem -> o2.lastModified; is WebDavItem -> o2.lastModified; is FtpItem -> o2.lastModified; is SftpItem -> o2.lastModified; is OneDriveItem -> (o2.lastModified ?: 0L); else -> 0L }
 
                             when (sortOrder) {
                                 SortOrder.NAME_ASC -> name1.compareTo(name2, ignoreCase = true)
@@ -307,6 +323,10 @@ fun NetworkBrowseScreen(
                                 FtpManager.isVideoFile(item.name) && !item.isDirectory)
                             is SftpItem -> Quadruple(item.name, item.path, item.isDirectory,
                                 SftpManager.isVideoFile(item.name) && !item.isDirectory)
+                            is GoogleDriveItem -> Quadruple(item.name, item.id, item.isDirectory,
+                                GoogleDriveManager.isVideoFile(item.mimeType, item.name) && !item.isDirectory)
+                            is OneDriveItem -> Quadruple(item.name, item.downloadUrl ?: item.id, item.isDirectory,
+                                OneDriveManager.isVideoFile(item.name) && !item.isDirectory)
                             else -> return@itemsIndexed
                         }
 
@@ -322,12 +342,19 @@ fun NetworkBrowseScreen(
                                 .onFocusChanged { isFocused = it.isFocused }
                                 .focusable()
                                 .onKeyEvent { event ->
-                                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
-                                        if (isDir) onFolderClick(path, name)
-                                        else if (isVideo) {
-                                            handleVideoClick(
-                                                item, credentials, sortedItems, playUrl = "", name, onVideoClick
-                                            )
+                                    if (event.key == Key.DirectionCenter || event.key == Key.Enter) {
+                                        if (event.type == KeyEventType.KeyDown) {
+                                            if (isDir) onFolderClick(path, name)
+                                            else if (isVideo) {
+                                                val playUrl = when (item) {
+                                                    is GoogleDriveItem -> GoogleDriveManager.getStreamUrl(item.id)
+                                                    is OneDriveItem -> item.downloadUrl ?: OneDriveManager.getStreamUrl(item.id)
+                                                    else -> ""
+                                                }
+                                                handleVideoClick(
+                                                    item, credentials, sortedItems, playUrl, name, context, coroutineScope, onVideoClick
+                                                )
+                                            }
                                         }
                                         true
                                     } else false
@@ -335,9 +362,14 @@ fun NetworkBrowseScreen(
                                 .clickable {
                                     if (isDir) onFolderClick(path, name)
                                     else if (isVideo) {
-                                            handleVideoClick(
-                                                item, credentials, sortedItems, playUrl = "", name, onVideoClick
-                                            )
+                                        val playUrl = when (item) {
+                                            is GoogleDriveItem -> GoogleDriveManager.getStreamUrl(item.id)
+                                            is OneDriveItem -> item.downloadUrl ?: OneDriveManager.getStreamUrl(item.id)
+                                            else -> ""
+                                        }
+                                        handleVideoClick(
+                                            item, credentials, sortedItems, playUrl, name, context, coroutineScope, onVideoClick
+                                        )
                                     }
                                 }
                                 .border(
@@ -437,13 +469,16 @@ private fun handleVideoClick(
     sortedItems: List<Any>,
     playUrl: String,
     name: String,
-    onVideoClick: (url: String, title: String, subUrl: String?, subExt: String?, playlist: List<PlaylistItem>, currentIndex: Int) -> Unit
+    context: Context,
+    coroutineScope: kotlinx.coroutines.CoroutineScope,
+    onVideoClick: (url: String, title: String, subUrl: String?, subExt: String?, playlist: List<PlaylistItem>, currentIndex: Int, httpHeaders: Map<String, String>) -> Unit
 ) {
     val path = when (item) {
         is SmbItem -> item.path
         is WebDavItem -> item.href
         is FtpItem -> item.path
         is SftpItem -> item.path
+        is OneDriveItem -> item.downloadUrl ?: item.id
         else -> ""
     }
     val targetPlayUrl = playUrl.ifBlank {
@@ -482,6 +517,8 @@ private fun handleVideoClick(
             is WebDavItem -> Triple(itItem.name, itItem.href, itItem.isDirectory)
             is FtpItem -> Triple(itItem.name, itItem.path, itItem.isDirectory)
             is SftpItem -> Triple(itItem.name, itItem.path, itItem.isDirectory)
+            is GoogleDriveItem -> Triple(itItem.name, itItem.id, itItem.isDirectory)
+            is OneDriveItem -> Triple(itItem.name, itItem.downloadUrl ?: itItem.id, itItem.isDirectory)
             else -> Triple("", "", true)
         }
         if (itIsDir || itItem == item) false
@@ -499,6 +536,8 @@ private fun handleVideoClick(
             is WebDavItem -> Triple(subItem.name, subItem.href, subItem.isDirectory)
             is FtpItem -> Triple(subItem.name, subItem.path, subItem.isDirectory)
             is SftpItem -> Triple(subItem.name, subItem.path, subItem.isDirectory)
+            is GoogleDriveItem -> Triple(subItem.name, subItem.id, subItem.isDirectory)
+            is OneDriveItem -> Triple(subItem.name, subItem.downloadUrl ?: subItem.id, subItem.isDirectory)
             else -> Triple("", "", true)
         }
         val authSubUrl = when (credentials.type) {
@@ -525,6 +564,13 @@ private fun handleVideoClick(
                 val encodedSPath = normSPath.split("/").joinToString("/") { android.net.Uri.encode(it) }
                 "sftp://${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$sftpHost$portStr$encodedSPath"
             }
+            "GOOGLE_DRIVE" -> {
+                GoogleDriveManager.getStreamUrl(sPath)
+            }
+            "ONEDRIVE" -> {
+                // If it's a downloadUrl (starts with http), use it directly. Otherwise use getStreamUrl
+                if (sPath.startsWith("http")) sPath else OneDriveManager.getStreamUrl(sPath)
+            }
             else -> sPath
         }
         authSubUrl to sName.substringAfterLast(".").lowercase()
@@ -537,6 +583,8 @@ private fun handleVideoClick(
             is WebDavItem -> Quadruple(itm.name, itm.href, itm.isDirectory, WebDavManager.isVideoFile(itm.name) && !itm.isDirectory)
             is FtpItem -> Quadruple(itm.name, itm.path, itm.isDirectory, FtpManager.isVideoFile(itm.name) && !itm.isDirectory)
             is SftpItem -> Quadruple(itm.name, itm.path, itm.isDirectory, SftpManager.isVideoFile(itm.name) && !itm.isDirectory)
+            is GoogleDriveItem -> Quadruple(itm.name, itm.id, itm.isDirectory, GoogleDriveManager.isVideoFile(itm.mimeType, itm.name) && !itm.isDirectory)
+            is OneDriveItem -> Quadruple(itm.name, itm.downloadUrl ?: itm.id, itm.isDirectory, OneDriveManager.isVideoFile(itm.name) && !itm.isDirectory)
             else -> Quadruple("", "", true, false)
         }
         itIsVideo
@@ -547,6 +595,8 @@ private fun handleVideoClick(
             is WebDavItem -> Quadruple(itm.name, itm.href, itm.isDirectory, false)
             is FtpItem -> Quadruple(itm.name, itm.path, itm.isDirectory, false)
             is SftpItem -> Quadruple(itm.name, itm.path, itm.isDirectory, false)
+            is GoogleDriveItem -> Quadruple(itm.name, itm.id, itm.isDirectory, false)
+            is OneDriveItem -> Quadruple(itm.name, itm.downloadUrl ?: itm.id, itm.isDirectory, false)
             else -> Quadruple("", "", true, false)
         }
         val itPlayUrl = when (credentials.type) {
@@ -573,6 +623,12 @@ private fun handleVideoClick(
                 val encodedItPath = normItPath.split("/").joinToString("/") { android.net.Uri.encode(it) }
                 "sftp://${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$sftpHost$portStr$encodedItPath"
             }
+            "GOOGLE_DRIVE" -> {
+                GoogleDriveManager.getStreamUrl(itPath)
+            }
+            "ONEDRIVE" -> {
+                if (itPath.startsWith("http")) itPath else OneDriveManager.getStreamUrl(itPath)
+            }
             else -> itPath
         }
         
@@ -583,6 +639,8 @@ private fun handleVideoClick(
                 is WebDavItem -> candItem.name
                 is FtpItem -> candItem.name
                 is SftpItem -> candItem.name
+                is GoogleDriveItem -> candItem.name
+                is OneDriveItem -> candItem.name
                 else -> ""
             }
             val candIsDir = when(candItem) {
@@ -590,6 +648,8 @@ private fun handleVideoClick(
                 is WebDavItem -> candItem.isDirectory
                 is FtpItem -> candItem.isDirectory
                 is SftpItem -> candItem.isDirectory
+                is GoogleDriveItem -> candItem.isDirectory
+                is OneDriveItem -> candItem.isDirectory
                 else -> true
             }
             if (candIsDir || candItem == itm) false else {
@@ -605,6 +665,8 @@ private fun handleVideoClick(
                     is WebDavItem -> iSubItem.href
                     is FtpItem -> iSubItem.path
                     is SftpItem -> iSubItem.path
+                    is GoogleDriveItem -> iSubItem.id
+                    is OneDriveItem -> iSubItem.downloadUrl ?: iSubItem.id
                     else -> ""
                 }
                 val sName = when(iSubItem) {
@@ -612,6 +674,8 @@ private fun handleVideoClick(
                     is WebDavItem -> iSubItem.name
                     is FtpItem -> iSubItem.name
                     is SftpItem -> iSubItem.name
+                    is GoogleDriveItem -> iSubItem.name
+                    is OneDriveItem -> iSubItem.name
                     else -> ""
                 }
                 val authSubUrl = when (credentials.type) {
@@ -635,6 +699,12 @@ private fun handleVideoClick(
                         val encodedSPath = normSPath.split("/").joinToString("/") { android.net.Uri.encode(it) }
                         "sftp://${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$sftpHost$portStr$encodedSPath"
                     }
+                    "GOOGLE_DRIVE" -> {
+                        GoogleDriveManager.getStreamUrl(sPath)
+                    }
+                    "ONEDRIVE" -> {
+                        if (sPath.startsWith("http")) sPath else OneDriveManager.getStreamUrl(sPath)
+                    }
                     else -> sPath
                 }
             authSubUrl to sName.substringAfterLast(".", "").lowercase()
@@ -644,7 +714,43 @@ private fun handleVideoClick(
     }
     val currentIdx = playlist.indexOfFirst { it.videoUrl == targetPlayUrl }
 
-    onVideoClick(targetPlayUrl, name, subUrl, subExt, playlist, currentIdx)
+    if (credentials.type == "GOOGLE_DRIVE") {
+        coroutineScope.launch(Dispatchers.IO) {
+            val account = kotlinx.coroutines.withContext(Dispatchers.Main) { GoogleDriveAuthManager.getSignedInAccount(context) }
+            val token = if (account != null) GoogleDriveManager.getAccessToken(context, account) else null
+            val httpHeaders = if (token != null) mapOf("Authorization" to "Bearer $token") else emptyMap()
+            
+            withContext(Dispatchers.Main) {
+                onVideoClick(targetPlayUrl, name, subUrl, subExt, playlist, currentIdx, httpHeaders)
+            }
+        }
+    } else if (credentials.type == "ONEDRIVE") {
+        coroutineScope.launch(Dispatchers.IO) {
+            val token = OneDriveAuthManager.getAccessToken()
+            var finalPlayUrl = targetPlayUrl
+            var httpHeaders = emptyMap<String, String>()
+            
+            if (targetPlayUrl.startsWith("https://graph.microsoft.com")) {
+                val fileId = (item as? OneDriveItem)?.id
+                if (fileId != null) {
+                    val directUrl = OneDriveManager.getDirectDownloadUrl(fileId)
+                    if (directUrl != null) {
+                        finalPlayUrl = directUrl
+                    } else if (token != null) {
+                        httpHeaders = mapOf("Authorization" to "Bearer $token")
+                    }
+                } else if (token != null) {
+                    httpHeaders = mapOf("Authorization" to "Bearer $token")
+                }
+            }
+            
+            withContext(Dispatchers.Main) {
+                onVideoClick(finalPlayUrl, name, subUrl, subExt, playlist, currentIdx, httpHeaders)
+            }
+        }
+    } else {
+        onVideoClick(targetPlayUrl, name, subUrl, subExt, playlist, currentIdx, emptyMap())
+    }
 }
 
 // 4개 요소를 가진 destructuring 헬퍼

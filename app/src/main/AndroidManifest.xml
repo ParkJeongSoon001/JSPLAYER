@@ -82,6 +82,31 @@
                 <data android:mimeType="video/*" />
             </intent-filter>
         </activity>
+
+        <!-- MSAL (Microsoft OneDrive) 인증 리다이렉트 처리 -->
+        <activity
+            android:name="com.microsoft.identity.client.BrowserTabActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <!--
+                    TODO: Azure 포털에서 앱 등록 시 생성된 Redirect URI와 일치해야 합니다.
+                    android:path에 /{Base64서명해시} 를 넣으세요.
+                    예: android:path="/YOUR_BASE64_SIGNATURE_HASH_HERE"
+                -->
+                <data
+                    android:scheme="msauth"
+                    android:host="com.sv21c.jsplayer"
+                    android:path="/cbi4aha6wIba9P44alTQ8gohdzI=" />
+                <data
+                    android:scheme="msauth"
+                    android:host="com.sv21c.jsplayer"
+                    android:path="/62e/rpEInTIBQeFjY6KqF2wNCY4=" />
+            </intent-filter>
+        </activity>
+
     </application>
 
 </manifest>

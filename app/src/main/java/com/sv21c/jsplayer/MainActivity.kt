@@ -49,6 +49,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import kotlinx.coroutines.delay
 import android.Manifest
@@ -118,7 +119,9 @@ sealed class ScreenState {
         val subtitleUrl: String? = null,
         val subtitleExtension: String? = null,
         val playlist: List<PlaylistItem> = emptyList(),
-        val currentIndex: Int = -1
+        val currentIndex: Int = -1,
+        val ftpEncoding: String = "AUTO",
+        val httpHeaders: Map<String, String> = emptyMap()
     ) : ScreenState()
 }
 
@@ -150,6 +153,13 @@ class MainActivity : ComponentActivity() {
     private lateinit var dlnaManager: DLNAManager
     // onBackPressAction: 빈 람다로 초기화 — null 없이 항상 안전 호출 가능
     private var onBackPressAction: () -> Unit = {}
+
+    // ── DLNA 캐스팅 (DMR) ────────────────────────────────────────
+    internal lateinit var rendererManager: DLNARendererManager
+    val rendererDevices = mutableStateListOf<Device<*, *, *>>()
+    val isCasting = mutableStateOf(false)
+    val currentRenderer = mutableStateOf<Device<*, *, *>?>(null)
+    private var localHttpServer: LocalHttpServer? = null
 
     // ── PIP (Picture-in-Picture) ─────────────────────────────────
     val isInPipMode = mutableStateOf(false)
@@ -326,6 +336,41 @@ class MainActivity : ComponentActivity() {
             }
         )
 
+        // ── DLNA 렌더러 매니저 (캐스팅용) 초기화 ──────────────────
+        rendererManager = DLNARendererManager(
+            context = this,
+            onRendererAdded = { device ->
+                runOnUiThread {
+                    if (rendererDevices.none { it.identity.udn == device.identity.udn }) {
+                        rendererDevices.add(device)
+                    }
+                }
+            },
+            onRendererRemoved = { device ->
+                runOnUiThread {
+                    rendererDevices.removeIf { it.identity.udn == device.identity.udn }
+                    // 현재 캐스팅 대상이 제거된 경우 캐스팅 중지
+                    if (currentRenderer.value?.identity?.udn == device.identity.udn) {
+                        isCasting.value = false
+                        currentRenderer.value = null
+                    }
+                }
+            }
+        )
+
+        // ── 로컬 HTTP 서버 시작 (캐스팅용) ────────────────────────
+        try {
+            localHttpServer = LocalHttpServer.getInstance(this)
+            localHttpServer?.start()
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "LocalHttpServer 시작 실패", e)
+        }
+
+        // ── OneDrive MSAL 초기화 (비동기) ────────────────────────
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            OneDriveAuthManager.initialize(this@MainActivity)
+        }
+
         enableEdgeToEdge()
         setContent {
             JSPLAYERTheme {
@@ -430,8 +475,14 @@ class MainActivity : ComponentActivity() {
 
                                             // 인코딩 감지 & SMI→SRT 변환
                                             try {
+                                                if (subFile.length() > 10 * 1024 * 1024) throw Exception("Subtitle too large")
                                                 val bytes = subFile.readBytes()
                                                 if (bytes.isNotEmpty()) {
+                                                    val sniffEnd = Math.min(bytes.size, 4096)
+                                                    val sniffText = String(bytes.copyOfRange(0, sniffEnd), kotlin.text.Charsets.UTF_8).lowercase()
+                                                    val isLikelySubtitle = sniffText.contains("<sami") || sniffText.contains("-->") || sniffText.contains("[script info]") || sniffText.contains("dialogue:") || sniffText.contains("webvtt")
+                                                    if (!isLikelySubtitle && bytes.size > 1024 * 1024) throw Exception("Doesn't look like a subtitle")
+                                                    
                                                     var text = ""
                                                     val b0 = bytes[0].toInt() and 0xFF
                                                     val b1 = if (bytes.size > 1) bytes[1].toInt() and 0xFF else 0
@@ -590,6 +641,8 @@ class MainActivity : ComponentActivity() {
                                     screenState = when (cur.credentials.type) {
                                         "SMB" -> ScreenState.SmbServerList()
                                         "FTP", "SFTP" -> ScreenState.FtpSftpServerList()
+                                        "GOOGLE_DRIVE" -> ScreenState.Home
+                                        "ONEDRIVE" -> ScreenState.Home
                                         else -> ScreenState.WebDavServerList()
                                     }
                                 }
@@ -597,6 +650,8 @@ class MainActivity : ComponentActivity() {
                                 screenState = when (cur.credentials.type) {
                                     "SMB" -> ScreenState.SmbServerList()
                                     "FTP", "SFTP" -> ScreenState.FtpSftpServerList()
+                                    "GOOGLE_DRIVE" -> ScreenState.Home
+                                    "ONEDRIVE" -> ScreenState.Home
                                     else -> ScreenState.WebDavServerList()
                                 }
                             }
@@ -635,6 +690,16 @@ class MainActivity : ComponentActivity() {
                             goBack()
                         }
                         is ScreenState.Playing -> {
+                            // 0단계: 캐스팅 중이면 먼저 캐스팅 종료
+                            if (isCasting.value) {
+                                currentRenderer.value?.let { device ->
+                                    rendererManager.stop(device) { _, _ -> }
+                                }
+                                isCasting.value = false
+                                currentRenderer.value = null
+                                localHttpServer?.clearSources()
+                                return
+                            }
                             // 1단계: 컨트롤이 보이면 먼저 숨김
                             if (isVideoControlVisible) {
                                 isVideoControlVisible = false
@@ -857,6 +922,39 @@ class MainActivity : ComponentActivity() {
                                     networkBrowsingCredentials = null
                                     screenState = ScreenState.FtpSftpServerList()
                                 },
+                                onGoogleDriveSuccess = { account ->
+                                    val navCreds = ServerCredentials(
+                                        type = "GOOGLE_DRIVE",
+                                        host = "drive.google.com",
+                                        username = account.email ?: "Unknown",
+                                        password = "",
+                                        displayName = "Google Drive"
+                                    )
+                                    android.util.Log.d("GoogleDrive", "Authentication Success: ${account.email}")
+                                    networkNavStack.clear()
+                                    networkBrowsingCredentials = navCreds
+                                    screenState = ScreenState.NetworkBrowsing(navCreds, "root", "내 드라이브")
+                                },
+                                onOneDriveClick = {
+                                    coroutineScope.launch {
+                                        val account = OneDriveAuthManager.signIn(this@MainActivity)
+                                        if (account != null) {
+                                            val navCreds = ServerCredentials(
+                                                type = "ONEDRIVE",
+                                                host = "onedrive.live.com",
+                                                username = account.username ?: "Unknown",
+                                                password = "",
+                                                displayName = "OneDrive"
+                                            )
+                                            android.util.Log.d("OneDrive", "Authentication Success: ${account.username}")
+                                            networkNavStack.clear()
+                                            networkBrowsingCredentials = navCreds
+                                            screenState = ScreenState.NetworkBrowsing(navCreds, "root", "내 OneDrive")
+                                        } else {
+                                            android.widget.Toast.makeText(this@MainActivity, "OneDrive 로그인이 실패하거나 취소되었습니다.", android.widget.Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
                                 onSettingsClick = { screenState = ScreenState.Settings },
                                 onLicenseClick = { screenState = ScreenState.LicensePolicy },
                                 isTvMode = isTvMode,
@@ -1042,9 +1140,17 @@ class MainActivity : ComponentActivity() {
                                                             return false // > 20MB is suspicious
                                                         }
                                                         
-                                                        val bytes = conn.inputStream.readBytes()
+                                                        val bytes = conn.inputStream.readBytesWithLimit(10 * 1024 * 1024)
                                                         if (bytes.isEmpty()) {
                                                             android.util.Log.d("SubtitleSearch", "Fetch failed: Empty body")
+                                                            return false
+                                                        }
+                                                        
+                                                        val sniffEnd = Math.min(bytes.size, 4096)
+                                                        val sniffText = String(bytes.copyOfRange(0, sniffEnd), kotlin.text.Charsets.UTF_8).lowercase()
+                                                        val isLikelySubtitle = sniffText.contains("<sami") || sniffText.contains("-->") || sniffText.contains("[script info]") || sniffText.contains("dialogue:") || sniffText.contains("webvtt")
+                                                        if (!isLikelySubtitle && bytes.size > 1024 * 1024) {
+                                                            android.util.Log.d("SubtitleSearch", "Fetch failed: Doesn't look like a subtitle")
                                                             return false
                                                         }
                                                         
@@ -1292,8 +1398,14 @@ class MainActivity : ComponentActivity() {
                                                         
                                                         // Convert SMI/Parse encoding
                                                         try {
+                                                            if (subFile.length() > 10 * 1024 * 1024) throw Exception("Subtitle too large")
                                                             val bytes = subFile.readBytes()
                                                             if (bytes.isNotEmpty()) {
+                                                                val sniffEnd = Math.min(bytes.size, 4096)
+                                                                val sniffText = String(bytes.copyOfRange(0, sniffEnd), kotlin.text.Charsets.UTF_8).lowercase()
+                                                                val isLikelySubtitle = sniffText.contains("<sami") || sniffText.contains("-->") || sniffText.contains("[script info]") || sniffText.contains("dialogue:") || sniffText.contains("webvtt")
+                                                                if (!isLikelySubtitle && bytes.size > 1024 * 1024) throw Exception("Doesn't look like a subtitle")
+                                                                
                                                                 var text = ""
                                                                 val b0 = bytes[0].toInt() and 0xFF
                                                                 val b1 = if (bytes.size > 1) bytes[1].toInt() and 0xFF else 0
@@ -1343,7 +1455,7 @@ class MainActivity : ComponentActivity() {
                                                                     android.util.Log.d("SubtitleSearch", "Successfully saved Local ASS to cache $localSubUrl")
                                                                 }
                                                             }
-                                                        } catch (e: Exception) {
+                                                        } catch (e: Throwable) {
                                                             android.util.Log.d("SubtitleSearch", "Error parsing local subtitle: ${e.message}")
                                                         }
                                                     } else {
@@ -1352,7 +1464,7 @@ class MainActivity : ComponentActivity() {
                                                 } else {
                                                     android.util.Log.d("SubtitleSearch", "Parent directory not accessible.")
                                                 }
-                                            } catch (e: Exception) {
+                                            } catch (e: Throwable) {
                                                 android.util.Log.d("SubtitleSearch", "Error searching local subtitle: ${e.message}")
                                             }
                                         } else {
@@ -1441,7 +1553,7 @@ class MainActivity : ComponentActivity() {
                                     networkNavStack.add(Pair(path, name))
                                     screenState = ScreenState.NetworkBrowsing(state.credentials, path, name)
                                 },
-                                onVideoClick = { url, title, subUrl, subExt, playlist, currentIndex ->
+                                onVideoClick = { url, title, subUrl, subExt, playlist, currentIndex, httpHeaders ->
                                     networkBrowsingCredentials = state.credentials
                                     screenState = ScreenState.Playing(
                                         videoUrl = url,
@@ -1449,7 +1561,9 @@ class MainActivity : ComponentActivity() {
                                         subtitleUrl = subUrl,
                                         subtitleExtension = subExt,
                                         playlist = playlist,
-                                        currentIndex = currentIndex
+                                        currentIndex = currentIndex,
+                                        ftpEncoding = if (state.credentials.type == "FTP") state.credentials.encoding else "AUTO",
+                                        httpHeaders = httpHeaders
                                     )
                                 }
                             )
@@ -1464,6 +1578,7 @@ class MainActivity : ComponentActivity() {
                                     title = state.title,
                                     isControlVisible = isVideoControlVisible,
                                     onControlVisibilityChange = { isVideoControlVisible = it },
+                                    httpHeaders = state.httpHeaders,
                                     onClose = {
                                         isVideoControlVisible = true // 다음 재생 시 초기화
                                         val creds = networkBrowsingCredentials
@@ -1484,6 +1599,7 @@ class MainActivity : ComponentActivity() {
                                     },
                                     playlist = state.playlist,
                                     currentIndex = state.currentIndex,
+                                    ftpEncoding = state.ftpEncoding,
                                     onPlayNext = { nextItem ->
                                         val nextIndex = state.currentIndex + 1
                                         android.util.Log.d("AutoPlay", "Playing next: ${nextItem.title} (index=$nextIndex)")
@@ -1495,7 +1611,8 @@ class MainActivity : ComponentActivity() {
                                             subtitleUrl = nextItem.subtitleUrl,
                                             subtitleExtension = nextItem.subtitleExtension,
                                             playlist = state.playlist,
-                                            currentIndex = nextIndex
+                                            currentIndex = nextIndex,
+                                            ftpEncoding = state.ftpEncoding
                                         )
                                     },
                                     onPlayPrevious = { prevItem ->
@@ -1507,8 +1624,86 @@ class MainActivity : ComponentActivity() {
                                             subtitleUrl = prevItem.subtitleUrl,
                                             subtitleExtension = prevItem.subtitleExtension,
                                             playlist = state.playlist,
-                                            currentIndex = prevIndex
+                                            currentIndex = prevIndex,
+                                            ftpEncoding = state.ftpEncoding
                                         )
+                                    },
+                                    // ── 캐스팅 콜백 ──
+                                    rendererDevices = rendererDevices.toList(),
+                                    isCasting = isCasting.value,
+                                    currentRenderer = currentRenderer.value,
+                                    onCastToDevice = { device, actualSubtitleUrl, positionMs ->
+                                        val httpServer = localHttpServer ?: return@VideoPlayerScreen
+                                        val credentials = networkBrowsingCredentials
+                                        val videoUrl = state.videoUrl
+                                        val videoTitle = state.title
+                                        val effectiveSubUrl = actualSubtitleUrl ?: state.subtitleUrl
+                                        // 네트워크 파일 크기 조회가 I/O를 수행하므로 백그라운드에서 실행
+                                        Thread {
+                                            android.util.Log.d("Casting", "━━━ 캐스팅 시작 (백그라운드) ━━━")
+                                            android.util.Log.d("Casting", "videoUrl: $videoUrl")
+                                            android.util.Log.d("Casting", "effectiveSubUrl: $effectiveSubUrl")
+                                            android.util.Log.d("Casting", "credentials: ${if (credentials != null) "있음(user=${credentials.username})" else "없음"}")
+                                            try {
+                                                val (streamUrl, streamSubUrl) = httpServer.getStreamableUrl(
+                                                    videoUrl,
+                                                    effectiveSubUrl,
+                                                    credentials
+                                                )
+                                                if (streamUrl.isBlank()) {
+                                                    android.util.Log.e("Casting", "스트리밍 URL을 생성할 수 없습니다")
+                                                    return@Thread
+                                                }
+                                                android.util.Log.d("Casting", "영상 스트림 URL: $streamUrl")
+                                                android.util.Log.d("Casting", "자막 스트림 URL: $streamSubUrl")
+                                                rendererManager.castToDevice(
+                                                    device = device,
+                                                    mediaUrl = streamUrl,
+                                                    title = videoTitle,
+                                                    subtitleUrl = streamSubUrl,
+                                                    startPositionMs = positionMs,
+                                                    onSuccess = {
+                                                        runOnUiThread {
+                                                            isCasting.value = true
+                                                            currentRenderer.value = device
+                                                        }
+                                                    },
+                                                    onFailure = { msg ->
+                                                        runOnUiThread {
+                                                            android.util.Log.e("Casting", "캐스팅 실패: $msg")
+                                                        }
+                                                    }
+                                                )
+                                            } catch (e: Exception) {
+                                                android.util.Log.e("Casting", "캐스팅 처리 오류: ${e.message}", e)
+                                            }
+                                        }.start()
+                                    },
+                                    onStopCasting = {
+                                        currentRenderer.value?.let { device ->
+                                            rendererManager.stop(device) { _, _ -> }
+                                        }
+                                        isCasting.value = false
+                                        currentRenderer.value = null
+                                        localHttpServer?.clearSources()
+                                    },
+                                    onCastPause = {
+                                        currentRenderer.value?.let { device ->
+                                            rendererManager.pause(device)
+                                        }
+                                    },
+                                    onCastResume = {
+                                        currentRenderer.value?.let { device ->
+                                            rendererManager.resume(device)
+                                        }
+                                    },
+                                    onCastSeek = { posMs ->
+                                        currentRenderer.value?.let { device ->
+                                            rendererManager.seek(device, posMs)
+                                        }
+                                    },
+                                    onSearchRenderers = {
+                                        rendererManager.search()
                                     }
                                 )
                             }
@@ -1522,17 +1717,27 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         dlnaManager.start()
+        rendererManager.start()
     }
 
     override fun onStop() {
         super.onStop()
         dlnaManager.stop()
+        rendererManager.stop()
     }
 
     override fun onDestroy() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try { unregisterReceiver(pipBroadcastReceiver) } catch (_: Exception) {}
         }
+        // 캐스팅 정리
+        try {
+            if (isCasting.value && currentRenderer.value != null) {
+                rendererManager.stop(currentRenderer.value!!) { _, _ -> }
+            }
+        } catch (_: Exception) {}
+        try { localHttpServer?.stop() } catch (_: Exception) {}
+        localHttpServer?.clearSources()
         super.onDestroy()
     }
 
@@ -2170,8 +2375,20 @@ fun VideoPlayerScreen(
     onClose: () -> Unit,
     playlist: List<PlaylistItem> = emptyList(),
     currentIndex: Int = -1,
+    ftpEncoding: String = "AUTO",
+    httpHeaders: Map<String, String> = emptyMap(),
     onPlayNext: ((PlaylistItem) -> Unit)? = null,
-    onPlayPrevious: ((PlaylistItem) -> Unit)? = null
+    onPlayPrevious: ((PlaylistItem) -> Unit)? = null,
+    // ── 캐스팅 관련 파라미터 ──
+    rendererDevices: List<Device<*, *, *>> = emptyList(),
+    isCasting: Boolean = false,
+    currentRenderer: Device<*, *, *>? = null,
+    onCastToDevice: (Device<*, *, *>, String?, Long) -> Unit = { _, _, _ -> },
+    onStopCasting: () -> Unit = {},
+    onCastPause: () -> Unit = {},
+    onCastResume: () -> Unit = {},
+    onCastSeek: (Long) -> Unit = {},
+    onSearchRenderers: () -> Unit = {}
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val activity = context as? android.app.Activity
@@ -2180,6 +2397,56 @@ fun VideoPlayerScreen(
     val totalButtons = 10
     val hasPrevious = playlist.isNotEmpty() && currentIndex > 0
     val hasNext = playlist.isNotEmpty() && currentIndex >= 0 && currentIndex < playlist.size - 1
+
+    // ── 캐스팅 UI 상태 ──
+    var showRendererDialog by remember { mutableStateOf(false) }
+    var castPosition by remember { mutableLongStateOf(0L) }
+    var castDuration by remember { mutableLongStateOf(1L) }
+    var castIsPlaying by remember { mutableStateOf(true) }
+    var castErrorMessage by remember { mutableStateOf<String?>(null) }
+    
+    // 재생이 실제로 시작되었는지 추적 (한번 플레이된 후 멈췄을 때만 자동 종료)
+    var hasStartedPlaying by remember { mutableStateOf(false) }
+
+    // 캐스팅 중 위치 동기화 (1초마다 폴링)
+    LaunchedEffect(isCasting, currentRenderer) {
+        if (isCasting && currentRenderer != null) {
+            hasStartedPlaying = false // 새 장치/캐스팅 시작 시 초기화
+            while (true) {
+                mainActivity?.let { act ->
+                    act.rendererManager.let { manager ->
+                        manager.getPositionInfo(
+                            currentRenderer,
+                            onResult = { pos, dur ->
+                                act.runOnUiThread {
+                                    castPosition = pos
+                                    castDuration = dur.coerceAtLeast(1L)
+                                }
+                            }
+                        )
+                        manager.getTransportInfo(
+                            currentRenderer,
+                            onResult = { state ->
+                                act.runOnUiThread {
+                                    val isPlaying = state == "PLAYING"
+                                    castIsPlaying = isPlaying
+                                    
+                                    if (isPlaying) {
+                                        hasStartedPlaying = true
+                                    } else if (hasStartedPlaying && state == "STOPPED") {
+                                        // 한 번이라도 재생 후 정지되었다면 영상이 끝났거나 강제 종료된 것이므로 팝업을 닫음
+                                        Log.d("CastingOverlay", "영상 재생 완료 또는 강제 정지 감지. 캐스팅 종료.")
+                                        onStopCasting()
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
+                delay(1000L)
+            }
+        }
+    }
 
     // --- Fullscreen & Landscape ---
     DisposableEffect(Unit) {
@@ -2256,6 +2523,29 @@ fun VideoPlayerScreen(
             showSeekIndicator = false
         }
     }
+
+    var brightnessText by remember { mutableStateOf("") }
+    var showBrightnessIndicator by remember { mutableStateOf(false) }
+    var isDraggingBrightness by remember { mutableStateOf(false) }
+
+    LaunchedEffect(showBrightnessIndicator, isDraggingBrightness) {
+        if (showBrightnessIndicator && !isDraggingBrightness) {
+            delay(800L)
+            showBrightnessIndicator = false
+        }
+    }
+
+    var volumeText by remember { mutableStateOf("") }
+    var showVolumeIndicator by remember { mutableStateOf(false) }
+    var isDraggingVolume by remember { mutableStateOf(false) }
+    var currentVolumeFloat by remember { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(showVolumeIndicator, isDraggingVolume) {
+        if (showVolumeIndicator && !isDraggingVolume) {
+            delay(800L)
+            showVolumeIndicator = false
+        }
+    }
     
     val currentIsControlVisible by androidx.compose.runtime.rememberUpdatedState(isControlVisible)
 
@@ -2274,7 +2564,7 @@ fun VideoPlayerScreen(
                 android.util.Log.d("AutoPlay", "VideoPlayerScreen: Using cached subtitle: $finalSubtitleUrl")
                 isSubReady = true
             } else {
-                val (url, ext) = downloadAndProcessSubtitle(context, subtitleUrl)
+                val (url, ext) = downloadAndProcessSubtitle(context, subtitleUrl, httpHeaders = httpHeaders, providedExtension = subtitleExtension)
                 if (url != null) {
                     finalSubtitleUrl = url
                     finalSubtitleExt = ext
@@ -2318,7 +2608,7 @@ fun VideoPlayerScreen(
                                                     ?: subs.find { it.extension.equals("srt", true) }
                                                     ?: subs.find { it.extension.equals("smi", true) }
                                                     ?: subs[0]
-                                                val (url, ext) = downloadAndProcessSubtitle(context, "file://" + subFile.absolutePath)
+                                                val (url, ext) = downloadAndProcessSubtitle(context, "file://" + subFile.absolutePath, ftpEncoding, httpHeaders, subFile.extension)
                                                 if (url != null) {
                                                     finalSubtitleUrl = url
                                                     finalSubtitleExt = ext
@@ -2332,21 +2622,22 @@ fun VideoPlayerScreen(
                                 }
                             }
                         }
-                    } catch (e: Exception) {
+                    } catch (e: Throwable) {
                         android.util.Log.d("AutoPlay", "VideoPlayerScreen: Error probing local subtitle: ${e.message}")
                     }
                 }
             } else {
                 // 네트워크 URL → 기존 확장자 기반 프로빙
+                val lastSlashIndex = videoUrl.lastIndexOf('/')
                 val lastDotIndex = videoUrl.lastIndexOf('.')
-                if (lastDotIndex > 0) {
+                if (lastDotIndex > lastSlashIndex && lastDotIndex > 0 && videoUrl.length - lastDotIndex <= 5) {
                     val baseUrl = videoUrl.substring(0, lastDotIndex)
                     var probeFound = false
                     for (probeExt in listOf("ass", "ssa", "srt", "smi", "vtt", "sub", "txt")) {
                         val probeUrl = "$baseUrl.$probeExt"
                         android.util.Log.d("AutoPlay", "VideoPlayerScreen: Probing subtitle: $probeUrl")
                         try {
-                            val (url, ext) = downloadAndProcessSubtitle(context, probeUrl)
+                            val (url, ext) = downloadAndProcessSubtitle(context, probeUrl, ftpEncoding, httpHeaders, probeExt)
                             if (url != null) {
                                 finalSubtitleUrl = url
                                 finalSubtitleExt = ext
@@ -2354,7 +2645,7 @@ fun VideoPlayerScreen(
                                 probeFound = true
                                 break
                             }
-                        } catch (e: Exception) {
+                        } catch (e: Throwable) {
                             android.util.Log.d("AutoPlay", "VideoPlayerScreen: Probe failed for $probeUrl: ${e.message}")
                         }
                     }
@@ -2395,6 +2686,7 @@ fun VideoPlayerScreen(
             .setExtensionRendererMode(extensionMode)
             
         var finalVideoUrl = videoUrl
+        val finalHeaders = httpHeaders.toMutableMap()
         val httpDataSourceFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
             
@@ -2405,7 +2697,7 @@ fun VideoPlayerScreen(
                 val encodedUserInfo = uri.encodedUserInfo
                 if (!userInfo.isNullOrBlank() && !encodedUserInfo.isNullOrBlank()) {
                     val authHeader = "Basic " + android.util.Base64.encodeToString(userInfo.toByteArray(kotlin.text.Charsets.UTF_8), android.util.Base64.NO_WRAP)
-                    httpDataSourceFactory.setDefaultRequestProperties(mapOf("Authorization" to authHeader))
+                    finalHeaders["Authorization"] = authHeader
                     
                     finalVideoUrl = videoUrl.replaceFirst("://$encodedUserInfo@", "://")
                     android.util.Log.d("VideoPlayerScreen", "Extracted userInfo from HTTP URL and added Authorization header.")
@@ -2414,6 +2706,8 @@ fun VideoPlayerScreen(
         } catch (e: Exception) {
             android.util.Log.e("VideoPlayerScreen", "Failed to parse UserInfo from URL", e)
         }
+        
+        httpDataSourceFactory.setDefaultRequestProperties(finalHeaders)
 
         val defaultDataSourceFactory = androidx.media3.datasource.DefaultDataSource.Factory(context, httpDataSourceFactory)
         
@@ -2429,7 +2723,7 @@ fun VideoPlayerScreen(
                         SmbManager.buildContext(userName, password)
                     }
                 }
-                private val ftpDataSource by lazy { FtpDataSource() }
+                private val ftpDataSource by lazy { FtpDataSource(ftpEncoding) }
                 private val sftpDataSource by lazy { SftpDataSource() }
 
                 override fun addTransferListener(transferListener: androidx.media3.datasource.TransferListener) {
@@ -2572,6 +2866,17 @@ fun VideoPlayerScreen(
                     android.util.Log.d("VideoPlayerScreen", "Restored playback position: ${savedPosition}ms")
                 }
             }
+    }
+
+    // ── 캐스팅 시 ExoPlayer 일시정지 / 캐스팅 종료 시 재개 ──
+    LaunchedEffect(isCasting) {
+        if (isCasting) {
+            exoPlayer.playWhenReady = false
+            android.util.Log.d("Casting", "캐스팅 시작 → ExoPlayer 일시정지")
+        } else {
+            exoPlayer.playWhenReady = true
+            android.util.Log.d("Casting", "캐스팅 종료 → ExoPlayer 재생 재개")
+        }
     }
 
     // Props version is used directly to ensure sync on recomposition
@@ -2771,6 +3076,7 @@ fun VideoPlayerScreen(
             10 -> isOrientationLocked = !isOrientationLocked // 회전 잠금/해제 토글
             11 -> { mainActivity?.enterPipMode(); return }
             12 -> { onClose(); return }
+            13 -> { showRendererDialog = true } // 캐스트 버튼
         }
         resetHideTimer()
     }
@@ -2828,6 +3134,73 @@ fun VideoPlayerScreen(
                         val deltaMs = (dragAmount * 150).toLong()
                         screenDragPosition = (screenDragPosition + deltaMs).coerceIn(0L, duration)
                         seekIndicatorText = "${formatSrtTime(screenDragPosition).substringBefore(",")} / ${formatSrtTime(duration).substringBefore(",")}"
+                    }
+                )
+            }
+            .pointerInput(Unit) {
+                detectVerticalDragGestures(
+                    onDragStart = { offset ->
+                        val screenWidth = size.width
+                        if (offset.x > screenWidth * 0.6f) { // 오른쪽 40% 영역: 밝기
+                            isDraggingBrightness = true
+                            showBrightnessIndicator = true
+                            if (activity != null) {
+                                val lp = activity.window.attributes
+                                var current = lp.screenBrightness
+                                if (current < 0f) {
+                                    try {
+                                        current = android.provider.Settings.System.getInt(
+                                            context.contentResolver, 
+                                            android.provider.Settings.System.SCREEN_BRIGHTNESS
+                                        ) / 255f
+                                    } catch (e: Exception) { current = 0.5f }
+                                    lp.screenBrightness = current
+                                    activity.window.attributes = lp
+                                }
+                                brightnessText = "☀ ${(current * 100).toInt()}%"
+                            }
+                        } else if (offset.x < screenWidth * 0.4f) { // 왼쪽 40% 영역: 볼륨
+                            isDraggingVolume = true
+                            showVolumeIndicator = true
+                            val audioManager = context.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
+                            val currentVol = audioManager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+                            val maxVol = audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+                            currentVolumeFloat = currentVol.toFloat()
+                            volumeText = "🔊 ${(currentVol.toFloat() / maxVol * 100).toInt()}%"
+                        }
+                    },
+                    onDragEnd = { 
+                        isDraggingBrightness = false 
+                        isDraggingVolume = false
+                    },
+                    onDragCancel = { 
+                        isDraggingBrightness = false 
+                        isDraggingVolume = false
+                    },
+                    onVerticalDrag = { _: androidx.compose.ui.input.pointer.PointerInputChange, dragAmount: Float ->
+                        val screenHeight = size.height
+                        if (isDraggingBrightness && activity != null) {
+                            // 위로 스크롤하면 dragAmount가 음수이므로 밝기 증가
+                            val deltaBrightness = -(dragAmount / screenHeight) * 1.5f
+                            val lp = activity.window.attributes
+                            var current = lp.screenBrightness
+                            if (current < 0f) current = 0.5f
+                            val newBrightness = (current + deltaBrightness).coerceIn(0.01f, 1f)
+                            lp.screenBrightness = newBrightness
+                            activity.window.attributes = lp
+                            brightnessText = "☀ ${(newBrightness * 100).toInt()}%"
+                        } else if (isDraggingVolume) {
+                            val audioManager = context.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
+                            val maxVol = audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+                            
+                            val deltaVol = -(dragAmount / screenHeight) * maxVol * 1.5f
+                            currentVolumeFloat = (currentVolumeFloat + deltaVol).coerceIn(0f, maxVol.toFloat())
+                            
+                            val newVolInt = currentVolumeFloat.toInt()
+                            audioManager.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, newVolInt, 0)
+                            
+                            volumeText = "🔊 ${(newVolInt.toFloat() / maxVol * 100).toInt()}%"
+                        }
                     }
                 )
             }
@@ -2900,6 +3273,7 @@ fun VideoPlayerScreen(
                 androidx.media3.ui.PlayerView(ctx).apply {
                     player = exoPlayer
                     useController = false // Use custom TV controller
+                    keepScreenOn = true // 재생 중 화면 꺼짐 방지
                     subtitleView?.setStyle(
                         androidx.media3.ui.CaptionStyleCompat(
                             android.graphics.Color.WHITE,
@@ -3039,6 +3413,8 @@ fun VideoPlayerScreen(
                             Spacer(Modifier.width(16.dp))
                             TvControlButton(label = "PIP\n화면", isFocused = focusedButtonIndex == 11, highlightColor = PrimaryColor, onClick = { executeButton(11) })
                             Spacer(Modifier.width(16.dp))
+                            TvControlButton(label = if (isCasting) "📺\n연결\u2713" else "📺\n캐스트", isFocused = focusedButtonIndex == 13, highlightColor = if (isCasting) Color(0xFF4CAF50) else PrimaryColor, onClick = { executeButton(13) })
+                            Spacer(Modifier.width(16.dp))
                             TvControlButton(label = "✕\n닫기", isFocused = focusedButtonIndex == 12, highlightColor = PrimaryColor, onClick = { executeButton(12) })
                         }
                     }
@@ -3071,6 +3447,8 @@ fun VideoPlayerScreen(
                         TvControlButton(label = if (isOrientationLocked) "회전\n잠금" else "회전\n해제", isFocused = focusedButtonIndex == 10, highlightColor = PrimaryColor, onClick = { executeButton(10) })
                         Spacer(Modifier.width(16.dp))
                         TvControlButton(label = "PIP\n화면", isFocused = focusedButtonIndex == 11, highlightColor = PrimaryColor, onClick = { executeButton(11) })
+                        Spacer(Modifier.width(16.dp))
+                        TvControlButton(label = if (isCasting) "📺\n연결\u2713" else "📺\n캐스트", isFocused = focusedButtonIndex == 13, highlightColor = if (isCasting) Color(0xFF4CAF50) else PrimaryColor, onClick = { executeButton(13) })
                         Spacer(Modifier.width(16.dp))
                         TvControlButton(label = "✕\n닫기", isFocused = focusedButtonIndex == 12, highlightColor = PrimaryColor, onClick = { executeButton(12) })
                     }
@@ -3108,6 +3486,317 @@ fun VideoPlayerScreen(
                 )
             }
         }
+
+        // --- Brightness Indicator Overlay ---
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showBrightnessIndicator,
+            enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(150)),
+            exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(300)),
+            modifier = Modifier.align(androidx.compose.ui.Alignment.CenterEnd).padding(end = 48.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.6f), androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                    .padding(horizontal = 24.dp, vertical = 32.dp),
+                contentAlignment = androidx.compose.ui.Alignment.Center
+            ) {
+                Text(
+                    text = brightnessText,
+                    color = Color.White,
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        // --- Volume Indicator Overlay ---
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showVolumeIndicator,
+            enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(150)),
+            exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(300)),
+            modifier = Modifier.align(androidx.compose.ui.Alignment.CenterStart).padding(start = 48.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.6f), androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                    .padding(horizontal = 24.dp, vertical = 32.dp),
+                contentAlignment = androidx.compose.ui.Alignment.Center
+            ) {
+                Text(
+                    text = volumeText,
+                    color = Color.White,
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        // ── 캐스팅 오버레이 ──────────────────────────────────────────
+        if (isCasting && currentRenderer != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.85f)),
+                contentAlignment = androidx.compose.ui.Alignment.Center
+            ) {
+                // X 종료 버튼 (우측 상단)
+                Box(
+                    modifier = Modifier
+                        .align(androidx.compose.ui.Alignment.TopEnd)
+                        .padding(16.dp)
+                        .size(44.dp)
+                        .background(Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape)
+                        .clickable { onStopCasting() },
+                    contentAlignment = androidx.compose.ui.Alignment.Center
+                ) {
+                    Text("✕", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                }
+                Column(
+                    horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(32.dp)
+                ) {
+                    Text("📺", style = MaterialTheme.typography.displayLarge)
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        text = "\"${currentRenderer.details?.friendlyName ?: "스마트 TV"}\"에서 재생 중",
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = title,
+                        color = Color.White.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 2,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    Spacer(Modifier.height(24.dp))
+
+                    // Slider 드래그 상태 관리
+                    var isCastDragging by remember { mutableStateOf(false) }
+                    var castDragValue by remember { mutableFloatStateOf(0f) }
+                    val castProgress = if (isCastDragging) castDragValue else (castPosition.toFloat() / castDuration.toFloat()).coerceIn(0f, 1f)
+                    Slider(
+                        value = castProgress,
+                        onValueChange = { newVal ->
+                            isCastDragging = true
+                            castDragValue = newVal
+                        },
+                        onValueChangeFinished = {
+                            val seekMs = (castDragValue * castDuration).toLong()
+                            onCastSeek(seekMs)
+                            castPosition = seekMs
+                            isCastDragging = false
+                        },
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFF4CAF50),
+                            activeTrackColor = Color(0xFF4CAF50),
+                            inactiveTrackColor = Color.White.copy(alpha = 0.24f)
+                        ),
+                        modifier = Modifier.fillMaxWidth(0.8f)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(0.8f),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(formatSrtTime(castPosition).substringBefore(","), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
+                        Text(formatSrtTime(castDuration).substringBefore(","), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
+                    }
+
+                    Spacer(Modifier.height(20.dp))
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(24.dp),
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .background(Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape)
+                                .clickable { onCastSeek((castPosition - 10000L).coerceAtLeast(0L)) },
+                            contentAlignment = androidx.compose.ui.Alignment.Center
+                        ) {
+                            Text("◀◀", color = Color.White, style = MaterialTheme.typography.bodySmall)
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .size(64.dp)
+                                .background(Color(0xFF4CAF50), androidx.compose.foundation.shape.CircleShape)
+                                .clickable { if (castIsPlaying) onCastPause() else onCastResume() },
+                            contentAlignment = androidx.compose.ui.Alignment.Center
+                        ) {
+                            Text(
+                                text = if (castIsPlaying) "⏸" else "▶",
+                                color = Color.White,
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .background(Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape)
+                                .clickable { onCastSeek((castPosition + 10000L).coerceAtMost(castDuration)) },
+                            contentAlignment = androidx.compose.ui.Alignment.Center
+                        ) {
+                            Text("▶▶", color = Color.White, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+
+                    Spacer(Modifier.height(24.dp))
+
+                    Box(
+                        modifier = Modifier
+                            .background(Color(0x44FF5252), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                            .clickable { onStopCasting() }
+                            .padding(horizontal = 24.dp, vertical = 12.dp)
+                    ) {
+                        Text("연결 해제", color = Color(0xFFFF5252), fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        // ── 캐스트 에러 메시지 ──
+        castErrorMessage?.let { msg ->
+            LaunchedEffect(msg) {
+                delay(3000L)
+                castErrorMessage = null
+            }
+            Box(
+                modifier = Modifier
+                    .align(androidx.compose.ui.Alignment.TopCenter)
+                    .padding(top = 60.dp)
+                    .background(Color(0xCC333333), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                    .padding(horizontal = 20.dp, vertical = 12.dp)
+            ) {
+                Text(msg, color = Color(0xFFFF5252), style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+
+    // ── 렌더러 선택 다이얼로그 ──────────────────────────────────────
+    if (showRendererDialog) {
+        LaunchedEffect(Unit) { onSearchRenderers() }
+
+        AlertDialog(
+            onDismissRequest = { showRendererDialog = false },
+            title = {
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Text("📺 ", style = MaterialTheme.typography.headlineSmall)
+                    Text("스마트 TV로 전송", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column {
+                    if (isCasting && currentRenderer != null) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF4CAF50).copy(alpha = 0.15f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .padding(12.dp)
+                        ) {
+                            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                Text("✅ ", style = MaterialTheme.typography.bodyLarge)
+                                Column {
+                                    Text(
+                                        text = currentRenderer.details?.friendlyName ?: "TV",
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF4CAF50)
+                                    )
+                                    Text("연결됨", style = MaterialTheme.typography.bodySmall, color = Color(0xFF4CAF50).copy(alpha = 0.7f))
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Divider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(Modifier.height(8.dp))
+                    }
+
+                    if (rendererDevices.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 24.dp),
+                            contentAlignment = androidx.compose.ui.Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(32.dp),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                Text("같은 네트워크의 TV를 검색 중...", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                            }
+                        }
+                    } else {
+                        Text("발견된 기기:", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                        Spacer(Modifier.height(8.dp))
+                        rendererDevices.forEach { device ->
+                            val isCurrentDevice = currentRenderer?.identity?.udn == device.identity.udn
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                                    .background(
+                                        if (isCurrentDevice) Color(0xFF4CAF50).copy(alpha = 0.1f)
+                                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable {
+                                        showRendererDialog = false
+                                        val currentPos = exoPlayer.currentPosition.coerceAtLeast(0L)
+                                        onCastToDevice(device, finalSubtitleUrl, currentPos)
+                                    }
+                                    .padding(12.dp)
+                            ) {
+                                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                    Text("📺 ", style = MaterialTheme.typography.bodyLarge)
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = device.details?.friendlyName ?: device.displayString,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                        )
+                                        val model = device.details?.modelDetails?.modelName ?: ""
+                                        if (model.isNotBlank()) {
+                                            Text(model, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                                        }
+                                    }
+                                    if (isCurrentDevice) {
+                                        Text("✓", color = Color(0xFF4CAF50), fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (isCasting) {
+                        TextButton(onClick = {
+                            showRendererDialog = false
+                            onStopCasting()
+                        }) {
+                            Text("연결 해제", color = Color(0xFFFF5252))
+                        }
+                    }
+                    TextButton(onClick = { onSearchRenderers() }) {
+                        Text("새로고침")
+                    }
+                    TextButton(onClick = { showRendererDialog = false }) {
+                        Text("닫기")
+                    }
+                }
+            }
+        )
     }
 }
 
@@ -3156,7 +3845,7 @@ fun TvControlButton(
 
 
 
-suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitleUrl: String): Pair<String?, String?> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitleUrl: String, ftpEncoding: String = "AUTO", httpHeaders: Map<String, String>? = null, providedExtension: String? = null): Pair<String?, String?> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
     try {
         // Clean up old cached_sub files (older than 24 hours) to prevent storage bloat
         context.cacheDir.listFiles()?.forEach {
@@ -3175,7 +3864,7 @@ suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitl
             val cleanUrl = subtitleUrl.replaceFirst(Regex("(?<=smb://).*?@"), "")
             val file = jcifs.smb.SmbFile(cleanUrl, ctx)
             val stream = file.inputStream
-            val b = stream.readBytes()
+            val b = stream.readBytesWithLimit()
             stream.close()
             b
         } else if (subtitleUrl.startsWith("http")) {
@@ -3192,11 +3881,16 @@ suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitl
             conn.requestMethod = "GET"
             conn.connectTimeout = 8000
             conn.readTimeout = 10000
-            if (authHeader != null) {
+            
+            httpHeaders?.forEach { (k, v) ->
+                conn.setRequestProperty(k, v)
+            }
+            
+            if (authHeader != null && conn.getRequestProperty("Authorization") == null) {
                 conn.setRequestProperty("Authorization", authHeader)
             }
             if (conn.responseCode !in 200..299) return@withContext null to null
-            conn.inputStream.readBytes()
+            conn.inputStream.readBytesWithLimit()
         } else if (subtitleUrl.startsWith("sftp://")) {
             val uri = android.net.Uri.parse(subtitleUrl)
             val userInfo = uri.userInfo
@@ -3216,19 +3910,27 @@ suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitl
             val port = if (uri.port > 0) uri.port else 21
             val remotePath = uri.path ?: ""
             
-            FtpManager.getFileBytes(host, port, username, password, remotePath).getOrNull()
+            FtpManager.getFileBytes(host, port, username, password, remotePath, ftpEncoding).getOrNull()
         } else {
             val path = subtitleUrl.replace("file://", "")
             val file = java.io.File(path)
-            if (file.exists()) file.readBytes() else null
+            if (file.exists()) {
+                if (file.length() > 10 * 1024 * 1024) throw Exception("Local file exceeds subtitle size limit (10MB).")
+                file.readBytes()
+            } else null
         }
         
         if (bytes == null || bytes.isEmpty()) return@withContext null to null
         
+        val sniffEnd = Math.min(bytes.size, 4096)
+        val sniffText = String(bytes.copyOfRange(0, sniffEnd), kotlin.text.Charsets.UTF_8).lowercase()
+        val isLikelySubtitle = sniffText.contains("<sami") || sniffText.contains("-->") || sniffText.contains("[script info]") || sniffText.contains("dialogue:") || sniffText.contains("webvtt")
+        if (!isLikelySubtitle && bytes.size > 1024 * 1024) return@withContext null to null
+        
         var text = ""
         val b0 = if (bytes.isNotEmpty()) bytes[0].toInt() and 0xFF else 0
         val b1 = if (bytes.size > 1) bytes[1].toInt() and 0xFF else 0
-        val ext = subtitleUrl.substringAfterLast('.').lowercase()
+        val ext = (providedExtension ?: subtitleUrl.substringAfterLast('.')).lowercase()
         
         if (b0 == 0xFF && b1 == 0xFE) {
             text = String(bytes, kotlin.text.Charsets.UTF_16LE)
@@ -3328,6 +4030,21 @@ fun formatSrtTime(ms: Long): String {
     val s = (ms % 60000) / 1000
     val msRem = ms % 1000
     return String.format(java.util.Locale.US, "%02d:%02d:%02d,%03d", h, m, s, msRem)
+}
+
+fun java.io.InputStream.readBytesWithLimit(limit: Int = 10 * 1024 * 1024): ByteArray {
+    val out = java.io.ByteArrayOutputStream(Math.max(8192, this.available().coerceAtMost(limit)))
+    val buffer = ByteArray(8192)
+    var bytesRead: Int
+    var totalBytes = 0
+    while (this.read(buffer).also { bytesRead = it } != -1) {
+        totalBytes += bytesRead
+        if (totalBytes > limit) {
+            throw java.io.IOException("File exceeds subtitle size limit (${limit / (1024 * 1024)}MB).")
+        }
+        out.write(buffer, 0, bytesRead)
+    }
+    return out.toByteArray()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -3795,6 +4512,8 @@ fun HomeScreen(
     onSmbClick: () -> Unit = {},
     onWebDavClick: () -> Unit = {},
     onFtpSftpClick: () -> Unit = {},
+    onGoogleDriveSuccess: (com.google.android.gms.auth.api.signin.GoogleSignInAccount) -> Unit = {},
+    onOneDriveClick: () -> Unit = {},
     onSettingsClick: () -> Unit = {},
     onLicenseClick: () -> Unit = {},
     isTvMode: Boolean = false,
@@ -3802,11 +4521,25 @@ fun HomeScreen(
     codecInstallResultMessage: String? = null
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    
+    val googleSignInLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val account = GoogleDriveAuthManager.handleSignInResult(result.data)
+        if (account != null) {
+            onGoogleDriveSuccess(account)
+        } else {
+            android.widget.Toast.makeText(context, "Google 로그인이 실패하거나 취소되었습니다.", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
     var isLocalFocused by remember { mutableStateOf(false) }
     var isDlnaFocused by remember { mutableStateOf(false) }
     var isSmbFocused by remember { mutableStateOf(false) }
     var isWebDavFocused by remember { mutableStateOf(false) }
     var isFtpSftpFocused by remember { mutableStateOf(false) }
+    var isGoogleDriveFocused by remember { mutableStateOf(false) }
+    var isOneDriveFocused by remember { mutableStateOf(false) }
 
     val card1BorderStart = Color(0xFFD280FF)
     val card1BorderEnd   = Color(0xFF7C3AED)
@@ -4193,6 +4926,129 @@ fun HomeScreen(
                         }
                         Spacer(Modifier.height(8.dp))
                         Text("FTP 또는 SFTP 서버에 접속하여 영상을 스트리밍합니다.", style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.7f))
+                    }
+                }
+                
+                Spacer(Modifier.height(12.dp))
+
+                // 구글 드라이브 접속 Card
+                val card6BorderStart = Color(0xFF4285F4)
+                val card6BorderEnd   = Color(0xFF34A853)
+                val card6Bg          = Color(0xFF0F224A)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(90.dp)
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                        .background(
+                            Brush.linearGradient(
+                                listOf(card6Bg, Color(0xFF08122B)),
+                                start = androidx.compose.ui.geometry.Offset(0f, 0f),
+                                end   = androidx.compose.ui.geometry.Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
+                            )
+                        )
+                        .border(
+                            width = if (isTvMode && isGoogleDriveFocused) 2.5.dp else 1.dp,
+                            brush = Brush.linearGradient(listOf(
+                                if (isTvMode && isGoogleDriveFocused) Color.White else card6BorderStart,
+                                card6BorderEnd
+                            )),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+                        )
+                        .onFocusChanged { isGoogleDriveFocused = it.isFocused }
+                        .focusable()
+                        .onKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) { 
+                                googleSignInLauncher.launch(GoogleDriveAuthManager.getSignInClient(context).signInIntent)
+                                true 
+                            } else false
+                        }
+                        .clickable { 
+                            googleSignInLauncher.launch(GoogleDriveAuthManager.getSignInClient(context).signInIntent)
+                        }
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .background(Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp)),
+                                contentAlignment = androidx.compose.ui.Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Cloud, null, tint = Color(0xFF90CAF9), modifier = Modifier.size(20.dp))
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Text("구글 드라이브 (Google Drive)", style = MaterialTheme.typography.titleMedium, color = Color.White, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            Spacer(Modifier.weight(1f))
+                            Text(">", color = Color.White.copy(alpha = 0.5f), style = MaterialTheme.typography.titleMedium)
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text("구글 드라이브 계정에 로그인하여 영상을 스트리밍합니다.", style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.7f))
+                    }
+                }
+
+
+                Spacer(Modifier.height(12.dp))
+
+                // 원드라이브 접속 Card
+                val card7BorderStart = Color(0xFF0078D4)
+                val card7BorderEnd   = Color(0xFF00BCF2)
+                val card7Bg          = Color(0xFF0A1E3D)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(90.dp)
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                        .background(
+                            Brush.linearGradient(
+                                listOf(card7Bg, Color(0xFF061428)),
+                                start = androidx.compose.ui.geometry.Offset(0f, 0f),
+                                end   = androidx.compose.ui.geometry.Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
+                            )
+                        )
+                        .border(
+                            width = if (isTvMode && isOneDriveFocused) 2.5.dp else 1.dp,
+                            brush = Brush.linearGradient(listOf(
+                                if (isTvMode && isOneDriveFocused) Color.White else card7BorderStart,
+                                card7BorderEnd
+                            )),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+                        )
+                        .onFocusChanged { isOneDriveFocused = it.isFocused }
+                        .focusable()
+                        .onKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) { 
+                                onOneDriveClick()
+                                true 
+                            } else false
+                        }
+                        .clickable { 
+                            onOneDriveClick()
+                        }
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .background(Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp)),
+                                contentAlignment = androidx.compose.ui.Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Cloud, null, tint = Color(0xFF00BCF2), modifier = Modifier.size(20.dp))
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Text("원드라이브 (OneDrive)", style = MaterialTheme.typography.titleMedium, color = Color.White, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            Spacer(Modifier.weight(1f))
+                            Text(">", color = Color.White.copy(alpha = 0.5f), style = MaterialTheme.typography.titleMedium)
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text("마이크로소프트 원드라이브 계정에 로그인하여 영상을 스트리밍합니다.", style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.7f))
                     }
                 }
 
