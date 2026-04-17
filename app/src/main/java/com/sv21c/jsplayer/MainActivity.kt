@@ -2908,7 +2908,7 @@ fun VideoPlayerScreen(
             
         val serviceIntent = android.content.Intent(context, PlaybackService::class.java)
         try {
-            androidx.core.content.ContextCompat.startForegroundService(context, serviceIntent)
+            context.startService(serviceIntent)
         } catch (e: Exception) {
             android.util.Log.e("VideoPlayerScreen", "Failed to start MediaSessionService", e)
         }
