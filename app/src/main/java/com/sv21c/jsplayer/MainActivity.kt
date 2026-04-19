@@ -1531,10 +1531,12 @@ class MainActivity : ComponentActivity() {
                                 onBackClick = { triggerBack() },
                                 onConnect = { creds ->
                                     networkBrowsingCredentials = creds
-                                    val rootPath = if (creds.type == "SFTP") "." else "/"
+                                    val uri = try { java.net.URI(creds.host) } catch (_: Exception) { null }
+                                    val pth = uri?.path?.takeIf { it.isNotBlank() && it != "/" } ?: (if (creds.type == "SFTP") "." else "/")
+                                    
                                     networkNavStack.clear()
-                                    networkNavStack.add(Pair(rootPath, creds.displayName.ifBlank { creds.host }))
-                                    screenState = ScreenState.NetworkBrowsing(creds, rootPath, creds.displayName.ifBlank { creds.host })
+                                    networkNavStack.add(Pair(pth, creds.displayName.ifBlank { creds.host }))
+                                    screenState = ScreenState.NetworkBrowsing(creds, pth, creds.displayName.ifBlank { creds.host })
                                 }
                             )
                         }

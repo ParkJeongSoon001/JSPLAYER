@@ -572,35 +572,35 @@ fun CredentialInputDialog(
     val isFtpSftp = serverType == "FTP_SFTP"
     var selectedProtocol by remember { mutableStateOf(if (isEditMode) editingCreds?.type ?: "FTP" else "FTP") }
     
-    // IP and Port for FTP_SFTP, or just host for SMB/WebDAV
     var host by remember { mutableStateOf("") }
-    var ip by remember { mutableStateOf("") }
     var port by remember { mutableStateOf("") }
+    var path by remember { mutableStateOf("") }
 
     LaunchedEffect(prefillHost, editingCreds) {
-        if (isFtpSftp) {
-            val uri = editingCreds?.host ?: prefillHost
-            if (uri.isNotBlank()) {
-                // sftp:// 또는 ftp:// 프로토콜 자동 감지
-                if (uri.startsWith("sftp://")) {
-                    selectedProtocol = "SFTP"
-                } else if (uri.startsWith("ftp://")) {
-                    selectedProtocol = "FTP"
-                }
-                val cleaned = uri.replace("sftp://", "").replace("ftp://", "").substringBefore("/")
-                val parts = cleaned.split(":")
-                if (parts.size == 2) {
-                    ip = parts[0]
-                    port = parts[1]
-                } else if (parts.size == 1) {
-                    ip = parts[0]
-                    port = if (selectedProtocol == "SFTP") "22" else "21"
-                }
-            } else {
-                port = if (selectedProtocol == "FTP") "21" else "22"
+        val uriStr = editingCreds?.host ?: prefillHost
+        if (uriStr.isNotBlank()) {
+            if (isFtpSftp) {
+                if (uriStr.startsWith("sftp://")) selectedProtocol = "SFTP"
+                else if (uriStr.startsWith("ftp://")) selectedProtocol = "FTP"
             }
-        } else {
-            host = editingCreds?.host ?: prefillHost
+            try {
+                val cleanUriStr = if (uriStr.contains("://")) uriStr else "dummy://$uriStr"
+                val uri = java.net.URI(cleanUriStr)
+                
+                val parsedHost = uri.host ?: ""
+                val prefix = if (uriStr.contains("://")) "${uri.scheme}://" else ""
+                host = if (parsedHost.isNotBlank()) "$prefix$parsedHost" else uriStr
+                
+                val p = uri.port
+                if (p != -1) port = p.toString()
+                
+                val pth = uri.path
+                if (pth != null && pth.length > 1) {
+                    path = pth.removePrefix("/")
+                }
+            } catch (e: Exception) {
+                host = uriStr
+            }
         }
     }
 
@@ -689,44 +689,48 @@ fun CredentialInputDialog(
                     }
                 }
 
-                if (isFtpSftp) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = ip,
-                            onValueChange = { ip = it },
-                            label = { Text("IP 주소 / 도메인") },
-                            placeholder = { Text("192.168.0.1", style = MaterialTheme.typography.bodySmall) },
-                            singleLine = true,
-                            modifier = Modifier.weight(0.7f),
-                            colors = fieldColors
-                        )
-                        OutlinedTextField(
-                            value = port,
-                            onValueChange = { port = it },
-                            label = { Text("포트") },
-                            placeholder = { Text(if (selectedProtocol == "FTP") "21" else "22", style = MaterialTheme.typography.bodySmall) },
-                            singleLine = true,
-                            modifier = Modifier.weight(0.3f),
-                            colors = fieldColors
-                        )
-                    }
-                } else {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = host,
                         onValueChange = { host = it },
-                        label = { Text("서버 주소") },
+                        label = { Text("서버 주소 / IP") },
                         placeholder = {
-                            val phText = when(serverType) {
-                                "SMB" -> "smb://192.168.0.1/"
-                                else -> "http://192.168.0.1:8080/"
+                            val phText = when(actualType) {
+                                "SMB" -> "smb://192.168.0.1"
+                                "FTP", "SFTP" -> "192.168.0.1"
+                                else -> "http://192.168.0.1"
                             }
                             Text(phText, style = MaterialTheme.typography.bodySmall)
                         },
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.weight(0.7f),
+                        colors = fieldColors
+                    )
+                    OutlinedTextField(
+                        value = port,
+                        onValueChange = { port = it },
+                        label = { Text("포트(선택)") },
+                        placeholder = { Text(
+                            when(actualType) {
+                                "FTP" -> "21"; "SFTP" -> "22"; "SMB" -> "445"; else -> "80"
+                            }, 
+                            style = MaterialTheme.typography.bodySmall
+                        ) },
+                        singleLine = true,
+                        modifier = Modifier.weight(0.3f),
                         colors = fieldColors
                     )
                 }
+
+                OutlinedTextField(
+                    value = path,
+                    onValueChange = { path = it },
+                    label = { Text("원격 경로 (선택)") },
+                    placeholder = { Text("예: /share/movie", style = MaterialTheme.typography.bodySmall) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = fieldColors
+                )
 
 
 
@@ -770,15 +774,35 @@ fun CredentialInputDialog(
             }
         },
         confirmButton = {
-            val isEnabled = if (isFtpSftp) ip.isNotBlank() && port.isNotBlank() else host.isNotBlank()
+            val isEnabled = host.isNotBlank()
             TextButton(
                 onClick = {
                     if (isEnabled) {
-                        val finalHost = if (isFtpSftp) {
-                            "${selectedProtocol.lowercase()}://${ip}:${port}/"
-                        } else {
-                            host.trim()
+                        val trimmedHost = host.trim().trimEnd('/')
+                        val hasScheme = trimmedHost.contains("://")
+                        val scheme = when(actualType) {
+                            "SMB" -> "smb"
+                            "FTP" -> "ftp"
+                            "SFTP" -> "sftp"
+                            "WEBDAV" -> "http"
+                            else -> "http"
                         }
+                        
+                        val baseHost = if (isFtpSftp) {
+                            val noScheme = if (hasScheme) trimmedHost.substringAfter("://") else trimmedHost
+                            "${actualType.lowercase()}://$noScheme"
+                        } else {
+                            if (hasScheme) trimmedHost else "$scheme://$trimmedHost"
+                        }
+
+                        // Check if baseHost already has a port, e.g. smb://192.168.1.1:5005
+                        val hasPortAlready = baseHost.matches(Regex(".*:[0-9]+$"))
+                        val portStr = if (port.isNotBlank() && !hasPortAlready) ":${port.trim()}" else ""
+                        
+                        val pathPart = path.trim().removePrefix("/").removeSuffix("/")
+                        
+                        val finalHost = if (pathPart.isNotBlank()) "$baseHost$portStr/$pathPart/" else "$baseHost$portStr/"
+
                         onConfirm(
                             ServerCredentials(actualType, finalHost, username.trim(), password, "", selectedEncoding),
                             saveCredentials

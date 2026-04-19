@@ -77,6 +77,9 @@ object WebDavManager {
         val directErr = directResult.exceptionOrNull()?.message ?: ""
         val isMethodError = directErr.contains("405") || directErr.contains("403")
             || directErr.contains("Not Allowed") || directErr.contains("Forbidden")
+            || directErr.contains("Not a valid DAV response")
+            || directErr.contains("Unexpected response")
+            || directErr.contains("404")
         if (!isMethodError) return directResult  // 네트워크 오류 등은 바로 반환
 
         Log.w(TAG, "Root path failed ($directErr), trying fallback WebDAV paths...")

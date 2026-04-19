@@ -340,25 +340,6 @@ fun NetworkBrowseScreen(
                                 .fillMaxWidth()
                                 .focusRequester(focusRequester)
                                 .onFocusChanged { isFocused = it.isFocused }
-                                .focusable()
-                                .onKeyEvent { event ->
-                                    if (event.key == Key.DirectionCenter || event.key == Key.Enter) {
-                                        if (event.type == KeyEventType.KeyDown) {
-                                            if (isDir) onFolderClick(path, name)
-                                            else if (isVideo) {
-                                                val playUrl = when (item) {
-                                                    is GoogleDriveItem -> GoogleDriveManager.getStreamUrl(item.id)
-                                                    is OneDriveItem -> item.downloadUrl ?: OneDriveManager.getStreamUrl(item.id)
-                                                    else -> ""
-                                                }
-                                                handleVideoClick(
-                                                    item, credentials, sortedItems, playUrl, name, context, coroutineScope, onVideoClick
-                                                )
-                                            }
-                                        }
-                                        true
-                                    } else false
-                                }
                                 .clickable {
                                     if (isDir) onFolderClick(path, name)
                                     else if (isVideo) {
