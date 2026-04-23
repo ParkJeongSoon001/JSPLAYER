@@ -5,6 +5,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -390,12 +392,12 @@ class MainActivity : ComponentActivity() {
                 var isLoading by remember { mutableStateOf(false) }
                 var errorMessage by remember { mutableStateOf<String?>(null) }
                 val coroutineScope = rememberCoroutineScope()
-                var showExitDialog by remember { mutableStateOf(false) }
+                var backPressedTime by remember { mutableStateOf(0L) }
                 var browsingDeviceOverride: Device<*, *, *>? by remember { mutableStateOf(null) }
                 var localBrowsingActiveMode: Boolean by remember { mutableStateOf(false) }
                 var localSortOrder by remember { mutableStateOf(SortOrder.NAME_ASC) }
                 var networkSortOrder by remember { mutableStateOf(SettingsStore.getSortOrder(this@MainActivity)) }
-                var localViewMode by remember { mutableStateOf(LocalViewMode.ALL_VIDEOS) }
+                var localViewMode by remember { mutableStateOf(SettingsStore.getLocalViewMode(this@MainActivity)) }
                 var localSelectedFolder by remember { mutableStateOf<String?>(null) }
                 var isSearchingServers by remember { mutableStateOf(false) }
                 val lastFocusedIndexMap = remember { mutableStateMapOf<String, Int>() }
@@ -640,7 +642,7 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     screenState = when (cur.credentials.type) {
                                         "SMB" -> ScreenState.SmbServerList()
-                                        "FTP", "SFTP" -> ScreenState.FtpSftpServerList()
+                                        "FTP", "SFTP", "FTPS" -> ScreenState.FtpSftpServerList()
                                         "GOOGLE_DRIVE" -> ScreenState.Home
                                         "ONEDRIVE" -> ScreenState.Home
                                         else -> ScreenState.WebDavServerList()
@@ -649,7 +651,7 @@ class MainActivity : ComponentActivity() {
                             } else {
                                 screenState = when (cur.credentials.type) {
                                     "SMB" -> ScreenState.SmbServerList()
-                                    "FTP", "SFTP" -> ScreenState.FtpSftpServerList()
+                                    "FTP", "SFTP", "FTPS" -> ScreenState.FtpSftpServerList()
                                     "GOOGLE_DRIVE" -> ScreenState.Home
                                     "ONEDRIVE" -> ScreenState.Home
                                     else -> ScreenState.WebDavServerList()
@@ -660,13 +662,16 @@ class MainActivity : ComponentActivity() {
                 }
 
                 fun triggerBack() {
-                    if (showExitDialog) {
-                        showExitDialog = false
-                        return
-                    }
                     when (screenState) {
                         is ScreenState.Home -> {
-                            showExitDialog = true
+                            val currentTime = System.currentTimeMillis()
+                            if (currentTime - backPressedTime <= 2000L) {
+                                allowFinish = true
+                                this@MainActivity.finish()
+                            } else {
+                                backPressedTime = currentTime
+                                android.widget.Toast.makeText(this@MainActivity, "한번 더 누르시면 종료됩니다.", android.widget.Toast.LENGTH_SHORT).show()
+                            }
                         }
                         is ScreenState.Settings -> {
                             screenState = ScreenState.Home
@@ -700,12 +705,7 @@ class MainActivity : ComponentActivity() {
                                 localHttpServer?.clearSources()
                                 return
                             }
-                            // 1단계: 컨트롤이 보이면 먼저 숨김
-                            if (isVideoControlVisible) {
-                                isVideoControlVisible = false
-                                return
-                            }
-                            // 2단계: 컨트롤 없는 상태에서 뒤로가기 → 이전 화면으로
+                            // 뒤로가기 → 바로 이전 화면으로 이동 (플레이어 종료)
                             isVideoControlVisible = true
                             val cur = screenState
                             if (cur is ScreenState.Playing) {
@@ -798,27 +798,8 @@ class MainActivity : ComponentActivity() {
 
                 // Removed LocalOnBackPressedDispatcherOwner logic as it's replaced by BackHandler(enabled=true) above
 
-                if (showExitDialog) {
-                    AlertDialog(
-                        onDismissRequest = { showExitDialog = false },
-                        title = { Text("앱 종료") },
-                        text = { Text("앱을 종료 하시겠습니까?") },
-                        confirmButton = {
-                            TextButton(onClick = {
-                                showExitDialog = false
-                                allowFinish = true       // finish() 오버라이드 허용
-                                this@MainActivity.finish()
-                            }) {
-                                Text("예")
-                            }
-                        },
-                        dismissButton = {
-                            TextButton(onClick = { showExitDialog = false }) {
-                                Text("아니오")
-                            }
-                        }
-                    )
-                }
+
+
 
                 if (showForegroundServicePermissionDialog) {
                     AlertDialog(
@@ -1346,7 +1327,10 @@ class MainActivity : ComponentActivity() {
                                 sortOrder = localSortOrder,
                                 onSortOrderChange = { localSortOrder = it },
                                 viewMode = localViewMode,
-                                onViewModeChange = { localViewMode = it },
+                                onViewModeChange = { 
+                                    localViewMode = it
+                                    SettingsStore.saveLocalViewMode(this@MainActivity, it)
+                                },
                                 selectedFolder = localSelectedFolder,
                                 onSelectedFolderChange = { localSelectedFolder = it },
                                 onBackClick = { triggerBack() },
@@ -2105,6 +2089,13 @@ fun BrowseScreen(
                     SortOrder.NAME_DESC -> name2.compareTo(name1, ignoreCase = true)
                     SortOrder.DATE_DESC -> date2.compareTo(date1) // String comparison for ISO dates usually works
                     SortOrder.DATE_ASC -> date1.compareTo(date2)
+                    SortOrder.PLAYED_DESC -> {
+                        val url1 = (o1 as? org.jupnp.support.model.item.Item)?.firstResource?.value ?: ""
+                        val url2 = (o2 as? org.jupnp.support.model.item.Item)?.firstResource?.value ?: ""
+                        val played1 = PlayHistoryStore.getLastPlayed(context, url1)
+                        val played2 = PlayHistoryStore.getLastPlayed(context, url2)
+                        played2.compareTo(played1)
+                    }
                 }
             }
         }
@@ -2456,8 +2447,10 @@ fun VideoPlayerScreen(
         if (activity != null) {
             val window = activity.window
             val insetsController = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+            // 초기: 상태바 + 네비게이션 바 모두 숨김 (transient 모드 — 스와이프로 일시 표시)
             insetsController.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            insetsController.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            insetsController.hide(androidx.core.view.WindowInsetsCompat.Type.statusBars())
+            insetsController.hide(androidx.core.view.WindowInsetsCompat.Type.navigationBars())
         }
         onDispose {
             if (activity != null) {
@@ -2471,14 +2464,38 @@ fun VideoPlayerScreen(
         }
     }
 
+    // --- 컨트롤 표시 시 네비게이션 바(뒤로가기 버튼바) 동기화 ---
+    // BEHAVIOR_DEFAULT: 네비게이션 바가 콘텐츠 영역 밖에 고정 배치되어 터치가 정상 동작
+    LaunchedEffect(isControlVisible) {
+        if (activity != null) {
+            val window = activity.window
+            val insetsController = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+            if (isControlVisible) {
+                // 컨트롤 표시 시: 네비게이션 바를 고정 표시 (터치 가능)
+                insetsController.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
+                insetsController.show(androidx.core.view.WindowInsetsCompat.Type.navigationBars())
+            } else {
+                // 컨트롤 숨김 시: transient 모드로 전환 후 숨김
+                insetsController.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                insetsController.hide(androidx.core.view.WindowInsetsCompat.Type.navigationBars())
+            }
+        }
+    }
+
     // --- UI State (isControlVisible는 외부에서 관리됨 — triggerBack에서 컨트롤) ---
     // Button index: 0=이전, 1=-10s, 2=Play/Pause, 3=+10s, 4=다음, 5=Sub-, 6=Sub+, 7=Speed, 8=Close, 9=SeekBar
     var focusedButtonIndex by remember { mutableIntStateOf(2) }
     var subtitleScale by remember { mutableFloatStateOf(1.0f) }
+    // 자막 트랙 선택 UI 상태
+    var subtitleTrackLabels by remember { mutableStateOf<List<Triple<String, Boolean, androidx.media3.common.TrackGroup>>>(emptyList()) }
+    var isSubtitleDisabled by remember { mutableStateOf(false) }
+    var showSubtitleDialog by remember { mutableStateOf(false) }
+    var userManuallySelectedSubtitle by remember { mutableStateOf(false) }
     var currentPosition by remember { mutableLongStateOf(0L) }
     var totalDuration by remember { mutableLongStateOf(1L) }
     var isPlaying by remember { mutableStateOf(true) }
     var currentSpeed by remember { mutableFloatStateOf(1.0f) }
+    var subtitleOffsetMs by remember { mutableLongStateOf(0L) }
     var hideTimerKey by remember { mutableIntStateOf(0) }
     var isOrientationLocked by remember { mutableStateOf(true) }
     var videoSizeState by remember { mutableStateOf<androidx.media3.common.VideoSize?>(null) }
@@ -2739,7 +2756,7 @@ fun VideoPlayerScreen(
                     val scheme = dataSpec.uri.scheme?.lowercase()
                     activeDataSource = when (scheme) {
                         "smb" -> smbDataSource
-                        "ftp" -> ftpDataSource
+                        "ftp", "ftps" -> ftpDataSource
                         "sftp" -> sftpDataSource
                         else -> defaultDataSource
                     }
@@ -2860,6 +2877,7 @@ fun VideoPlayerScreen(
                 }
 
                 playWhenReady = true
+                PlayHistoryStore.markPlayed(context, videoUrl)
                 
                 // 저장된 재생 위치로 이동
                 val savedPosition = PlaybackPositionStore.getPosition(context, videoUrl)
@@ -2950,50 +2968,77 @@ fun VideoPlayerScreen(
                 android.util.Log.d("VideoPlayerScreen", "onTracksChanged: ${tracks.groups.size} groups")
                 
                 var bestGroup: androidx.media3.common.Tracks.Group? = null
+                var bestTrackIdx = 0
                 var bestScore = -1
                 
+                // 자막 트랙 목록 수집 (UI 표시용)
+                val collectedTracks = mutableListOf<Triple<String, Boolean, androidx.media3.common.TrackGroup>>()
+                var textGroupCount = 0
+                
                 for (group in tracks.groups) {
-                    if (group.type != androidx.media3.common.C.TRACK_TYPE_TEXT || !group.isSupported) continue
+                    if (group.type != androidx.media3.common.C.TRACK_TYPE_TEXT) continue
+                    textGroupCount++
                     
-                    val format = group.mediaTrackGroup.getFormat(0)
-                    val lang = format.language
-                    val mimeType = format.sampleMimeType ?: ""
-                    val id = format.id ?: ""
-                    
-                    var score = 0
-                    if (id == "jsplayer_external_sub") {
-                        score = 1000 // 외부 자막 최우선
-                    } else if (lang == "ko" || lang == "kor") {
-                        score = 500
-                    } else if (lang == null || lang == "und" || lang == "") {
-                        if (mimeType.contains("x-sami") || mimeType.contains("subrip") || mimeType.contains("vtt") || mimeType.contains("ssa")) {
-                            score = 100
+                    // 그룹 내 모든 트랙을 순회 (MKV는 보통 그룹당 1트랙이지만 다중 트랙 가능)
+                    for (trackIdx in 0 until group.mediaTrackGroup.length) {
+                        val format = group.mediaTrackGroup.getFormat(trackIdx)
+                        val lang = format.language
+                        val mimeType = format.sampleMimeType ?: ""
+                        val id = format.id ?: ""
+                        val trackLabel = format.label
+                        
+                        android.util.Log.d("VideoPlayerScreen", "  TEXT track[$textGroupCount-$trackIdx]: lang=$lang, mime=$mimeType, id=$id, label=$trackLabel, selected=${group.isTrackSelected(trackIdx)}")
+                        
+                        // 라벨 생성 - 항상 언어코드 기반 한글명 우선, 부가 정보로 format.label 사용
+                        val displayLabel = buildSubtitleLabel(lang, id, mimeType, trackLabel)
+                        val selected = group.isTrackSelected(trackIdx)
+                        collectedTracks.add(Triple(displayLabel, selected, group.mediaTrackGroup))
+                        
+                        // 자동선택 스코어링
+                        var score = 0
+                        if (id == "jsplayer_external_sub") {
+                            score = 1000
+                        } else if (lang == "ko" || lang == "kor") {
+                            score = 500
+                        } else if (lang == null || lang == "und" || lang == "") {
+                            if (mimeType.contains("x-sami") || mimeType.contains("subrip") || mimeType.contains("vtt") || mimeType.contains("ssa")) {
+                                score = 100
+                            } else {
+                                score = 10
+                            }
+                        } else if (lang == "en" || lang == "eng") {
+                            score = 1
                         } else {
-                            score = 10
+                            score = 5
                         }
-                    } else if (lang == "en" || lang == "eng") {
-                        score = 1 // 영어는 최하위 (다른 대안이 있을 경우)
-                    } else {
-                        score = 5
-                    }
-                    
-                    if (score > bestScore) {
-                        bestScore = score
-                        bestGroup = group
+                        
+                        if (score > bestScore) {
+                            bestScore = score
+                            bestGroup = group
+                            bestTrackIdx = trackIdx
+                        }
                     }
                 }
                 
-                if (bestGroup != null && !bestGroup.isSelected) {
+                android.util.Log.d("VideoPlayerScreen", "Collected ${collectedTracks.size} subtitle tracks from $textGroupCount text groups")
+                
+                // UI 상태 업데이트
+                subtitleTrackLabels = collectedTracks
+                
+                // 사용자가 수동 선택한 경우 자동선택 건너뛰기
+                if (userManuallySelectedSubtitle) {
+                    android.util.Log.d("VideoPlayerScreen", "Skipping auto-selection: user manually selected subtitle")
+                } else if (bestGroup != null && !bestGroup.isTrackSelected(bestTrackIdx)) {
                     trackSelector.setParameters(
                         trackSelector.buildUponParameters()
                             .setOverrideForType(
                                 androidx.media3.common.TrackSelectionOverride(
                                     bestGroup.mediaTrackGroup,
-                                    0
+                                    bestTrackIdx
                                 )
                             )
                     )
-                    android.util.Log.d("VideoPlayerScreen", "Selected best subtitle track: score=$bestScore, lang=${bestGroup.mediaTrackGroup.getFormat(0).language}")
+                    android.util.Log.d("VideoPlayerScreen", "Auto-selected subtitle track: score=$bestScore, lang=${bestGroup.mediaTrackGroup.getFormat(bestTrackIdx).language}")
                 }
             }
         }
@@ -3079,6 +3124,9 @@ fun VideoPlayerScreen(
             11 -> { mainActivity?.enterPipMode(); return }
             12 -> { onClose(); return }
             13 -> { showRendererDialog = true } // 캐스트 버튼
+            14 -> subtitleOffsetMs = (subtitleOffsetMs - 500L).coerceIn(-5000L, 5000L)
+            15 -> subtitleOffsetMs = (subtitleOffsetMs + 500L).coerceIn(-5000L, 5000L)
+            -100 -> showSubtitleDialog = true
         }
         resetHideTimer()
     }
@@ -3102,6 +3150,7 @@ fun VideoPlayerScreen(
                         if (!currentIsControlVisible) hideTimerKey++
                     },
                     onDoubleTap = { offset ->
+                        if (currentIsControlVisible) return@detectTapGestures
                         val screenWidth = size.width
                         if (offset.x < screenWidth / 2f) {
                             exoPlayer.seekTo((exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L))
@@ -3119,19 +3168,23 @@ fun VideoPlayerScreen(
             .pointerInput(Unit) {
                 detectHorizontalDragGestures(
                     onDragStart = { _ ->
+                        if (currentIsControlVisible) return@detectHorizontalDragGestures
                         isDraggingScreen = true
                         screenDragPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
                         showSeekIndicator = true
                     },
                     onDragEnd = {
+                        if (!isDraggingScreen) return@detectHorizontalDragGestures
                         isDraggingScreen = false
                         exoPlayer.seekTo(screenDragPosition)
                     },
                     onDragCancel = {
+                        if (!isDraggingScreen) return@detectHorizontalDragGestures
                         isDraggingScreen = false
                         showSeekIndicator = false
                     },
                     onHorizontalDrag = { change: androidx.compose.ui.input.pointer.PointerInputChange, dragAmount: Float ->
+                        if (!isDraggingScreen) return@detectHorizontalDragGestures
                         val duration = exoPlayer.duration.coerceAtLeast(1L)
                         val deltaMs = (dragAmount * 150).toLong()
                         screenDragPosition = (screenDragPosition + deltaMs).coerceIn(0L, duration)
@@ -3142,6 +3195,7 @@ fun VideoPlayerScreen(
             .pointerInput(Unit) {
                 detectVerticalDragGestures(
                     onDragStart = { offset ->
+                        if (currentIsControlVisible) return@detectVerticalDragGestures
                         val screenWidth = size.width
                         if (offset.x > screenWidth * 0.6f) { // 오른쪽 40% 영역: 밝기
                             isDraggingBrightness = true
@@ -3180,6 +3234,7 @@ fun VideoPlayerScreen(
                         isDraggingVolume = false
                     },
                     onVerticalDrag = { _: androidx.compose.ui.input.pointer.PointerInputChange, dragAmount: Float ->
+                        if (currentIsControlVisible) return@detectVerticalDragGestures
                         val screenHeight = size.height
                         if (isDraggingBrightness && activity != null) {
                             // 위로 스크롤하면 dragAmount가 음수이므로 밝기 증가
@@ -3211,16 +3266,27 @@ fun VideoPlayerScreen(
                     when (event.key) {
                         Key.DirectionCenter -> {
                             if (!isControlVisible) { onControlVisibilityChange(true); hideTimerKey++ }
-                            else if (focusedButtonIndex != 10) executeButton(focusedButtonIndex)
+                            else if (focusedButtonIndex != 100) executeButton(focusedButtonIndex)
                             true
                         }
                         Key.DirectionLeft -> {
                             if (isControlVisible) {
-                                if (focusedButtonIndex == 10) {
-                                    // Slider seek -5s
+                                if (focusedButtonIndex == 100) {
                                     exoPlayer.seekTo((exoPlayer.currentPosition - 5_000L).coerceAtLeast(0L))
                                 } else {
-                                    focusedButtonIndex = maxOf(0, focusedButtonIndex - 1)
+                                    focusedButtonIndex = when (focusedButtonIndex) {
+                                        6 -> 5
+                                        15 -> 14
+                                        7 -> 9
+                                        12 -> -100 // Close -> Subtitle Settings
+                                        1 -> 0
+                                        2 -> 1
+                                        3 -> 2
+                                        4 -> 3
+                                        11 -> 10
+                                        13 -> 11
+                                        else -> focusedButtonIndex
+                                    }
                                 }
                                 resetHideTimer()
                             } else {
@@ -3230,11 +3296,23 @@ fun VideoPlayerScreen(
                         }
                         Key.DirectionRight -> {
                             if (isControlVisible) {
-                                if (focusedButtonIndex == 100) { // Slider index changed to 100 to avoid conflict
-                                    // Slider seek +5s
+                                if (focusedButtonIndex == 100) {
                                     exoPlayer.seekTo((exoPlayer.currentPosition + 5_000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
                                 } else {
-                                    focusedButtonIndex = minOf(12, focusedButtonIndex + 1)
+                                    focusedButtonIndex = when (focusedButtonIndex) {
+                                        5 -> 6
+                                        14 -> 15
+                                        9 -> 7
+                                        -100 -> 12 // Subtitle Settings -> Close
+                                        6, 15, 7 -> 12 // Right from left panel -> Close
+                                        0 -> 1
+                                        1 -> 2
+                                        2 -> 3
+                                        3 -> 4
+                                        10 -> 11
+                                        11 -> 13
+                                        else -> focusedButtonIndex
+                                    }
                                 }
                                 resetHideTimer()
                             } else {
@@ -3243,21 +3321,42 @@ fun VideoPlayerScreen(
                             true
                         }
                         Key.DirectionUp -> {
-                            if (isControlVisible && focusedButtonIndex < 100) {
-                                focusedButtonIndex = 100 // Move to Slider
+                            if (isControlVisible) {
+                                focusedButtonIndex = when (focusedButtonIndex) {
+                                    10, 11 -> 1 // lock/resize -> -10s
+                                    13 -> 3 // speed -> +10s
+                                    0, 1, 2, 3, 4 -> 100 // Top bottom row -> Slider
+                                    100 -> 9 // Slider -> Speed Minus
+                                    9, 7 -> 14 // Speed -> Sync
+                                    14, 15 -> 5 // Sync -> Size
+                                    5, 6 -> -100 // Size -> Subtitle Settings
+                                    12 -> 12 // Close stays
+                                    else -> focusedButtonIndex
+                                }
+                                resetHideTimer()
                             } else {
                                 subtitleScale = minOf(3.0f, subtitleScale + 0.15f)
                             }
-                            resetHideTimer()
                             true
                         }
                         Key.DirectionDown -> {
-                            if (isControlVisible && focusedButtonIndex == 100) {
-                                focusedButtonIndex = 2 // Move to Play/Pause button
+                            if (isControlVisible) {
+                                focusedButtonIndex = when (focusedButtonIndex) {
+                                    -100 -> 5 // Subtitle Settings -> Size Minus
+                                    12 -> 100 // Close -> Slider
+                                    5, 6 -> 14 // Size -> Sync
+                                    14, 15 -> 9 // Sync -> Speed
+                                    9, 7 -> 100 // Speed -> Slider
+                                    100 -> 2 // Slider -> Play/Pause
+                                    0 -> 10 // Prev -> Lock
+                                    1, 2 -> 11 // -10s, Play -> Resize
+                                    3, 4 -> 13 // +10s, Next -> Speed toggle
+                                    else -> focusedButtonIndex
+                                }
+                                resetHideTimer()
                             } else {
                                 subtitleScale = maxOf(0.5f, subtitleScale - 0.15f)
                             }
-                            resetHideTimer()
                             true
                         }
                         Key.Back -> { 
@@ -3320,7 +3419,7 @@ fun VideoPlayerScreen(
                     .background(
                         Brush.verticalGradient(listOf(Color.Transparent, Color(0xE6180F23), Color(0xFF180F23)))
                     )
-                    .padding(horizontal = 36.dp, vertical = 20.dp)
+                    .padding(start = 72.dp, end = 72.dp, top = 20.dp, bottom = 8.dp)
             ) {
                 // Title
                 Text(
@@ -3396,28 +3495,11 @@ fun VideoPlayerScreen(
                             horizontalArrangement = Arrangement.Center,
                             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                         ) {
-                            TvControlButton(label = "자막\n－", isFocused = focusedButtonIndex == 5, highlightColor = PrimaryColor, onClick = { executeButton(5) })
-                            Spacer(Modifier.width(8.dp))
-                            TvControlButton(label = "자막\n＋", isFocused = focusedButtonIndex == 6, highlightColor = PrimaryColor, onClick = { executeButton(6) })
-                            Spacer(Modifier.width(8.dp))
-                            TvControlButton(label = "속도\n＋", isFocused = focusedButtonIndex == 7, highlightColor = PrimaryColor, onClick = { executeButton(7) })
-                            Spacer(Modifier.width(8.dp))
-                            TvControlButton(label = "${currentSpeed}x\n초기화", isFocused = focusedButtonIndex == 8, highlightColor = PrimaryColor, onClick = { executeButton(8) })
-                            Spacer(Modifier.width(8.dp))
-                            TvControlButton(label = "속도\n－", isFocused = focusedButtonIndex == 9, highlightColor = PrimaryColor, onClick = { executeButton(9) })
-                        }
-                        Spacer(Modifier.height(10.dp))
-                        Row(
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                        ) {
                             TvControlButton(label = if (isOrientationLocked) "회전\n잠금" else "회전\n해제", isFocused = focusedButtonIndex == 10, highlightColor = PrimaryColor, onClick = { executeButton(10) })
                             Spacer(Modifier.width(16.dp))
                             TvControlButton(label = "PIP\n화면", isFocused = focusedButtonIndex == 11, highlightColor = PrimaryColor, onClick = { executeButton(11) })
                             Spacer(Modifier.width(16.dp))
-                            TvControlButton(label = if (isCasting) "📺\n연결\u2713" else "📺\n캐스트", isFocused = focusedButtonIndex == 13, highlightColor = if (isCasting) Color(0xFF4CAF50) else PrimaryColor, onClick = { executeButton(13) })
-                            Spacer(Modifier.width(16.dp))
-                            TvControlButton(label = "✕\n닫기", isFocused = focusedButtonIndex == 12, highlightColor = PrimaryColor, onClick = { executeButton(12) })
+                            TvControlButton(label = if (isCasting) "📺\n연결✓" else "📺\n캐스트", isFocused = focusedButtonIndex == 13, highlightColor = if (isCasting) Color(0xFF4CAF50) else PrimaryColor, onClick = { executeButton(13) })
                         }
                     }
                 } else {
@@ -3436,34 +3518,14 @@ fun VideoPlayerScreen(
                         Spacer(Modifier.width(8.dp))
                         TvControlButton(label = "⏭\n다음", isFocused = focusedButtonIndex == 4, highlightColor = PrimaryColor, onClick = { executeButton(4) }, enabled = hasNext)
                         Spacer(Modifier.width(16.dp))
-                        TvControlButton(label = "자막\n－", isFocused = focusedButtonIndex == 5, highlightColor = PrimaryColor, onClick = { executeButton(5) })
-                        Spacer(Modifier.width(8.dp))
-                        TvControlButton(label = "자막\n＋", isFocused = focusedButtonIndex == 6, highlightColor = PrimaryColor, onClick = { executeButton(6) })
-                        Spacer(Modifier.width(16.dp))
-                        TvControlButton(label = "속도\n＋", isFocused = focusedButtonIndex == 7, highlightColor = PrimaryColor, onClick = { executeButton(7) })
-                        Spacer(Modifier.width(8.dp))
-                        TvControlButton(label = "${currentSpeed}x\n초기화", isFocused = focusedButtonIndex == 8, highlightColor = PrimaryColor, onClick = { executeButton(8) })
-                        Spacer(Modifier.width(8.dp))
-                        TvControlButton(label = "속도\n－", isFocused = focusedButtonIndex == 9, highlightColor = PrimaryColor, onClick = { executeButton(9) })
-                        Spacer(Modifier.width(16.dp))
                         TvControlButton(label = if (isOrientationLocked) "회전\n잠금" else "회전\n해제", isFocused = focusedButtonIndex == 10, highlightColor = PrimaryColor, onClick = { executeButton(10) })
                         Spacer(Modifier.width(16.dp))
                         TvControlButton(label = "PIP\n화면", isFocused = focusedButtonIndex == 11, highlightColor = PrimaryColor, onClick = { executeButton(11) })
                         Spacer(Modifier.width(16.dp))
-                        TvControlButton(label = if (isCasting) "📺\n연결\u2713" else "📺\n캐스트", isFocused = focusedButtonIndex == 13, highlightColor = if (isCasting) Color(0xFF4CAF50) else PrimaryColor, onClick = { executeButton(13) })
-                        Spacer(Modifier.width(16.dp))
-                        TvControlButton(label = "✕\n닫기", isFocused = focusedButtonIndex == 12, highlightColor = PrimaryColor, onClick = { executeButton(12) })
+                        TvControlButton(label = if (isCasting) "📺\n연결✓" else "📺\n캐스트", isFocused = focusedButtonIndex == 13, highlightColor = if (isCasting) Color(0xFF4CAF50) else PrimaryColor, onClick = { executeButton(13) })
                     }
                 }
 
-                // Shortcut hints (Updated for Slider navigation)
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = "↑↓ 시크바/버튼 이동  |  ◀ ▶ 포커스 이동/가속  |  확인 실행  |  BACK 닫기",
-                    color = Color.White.copy(alpha = 0.45f),
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.align(androidx.compose.ui.Alignment.CenterHorizontally)
-                )
             }
         }
 
@@ -3530,6 +3592,106 @@ fun VideoPlayerScreen(
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold
                 )
+            }
+        }
+
+        // ── 왼쪽 패널: 자막 & 재생 속도 조절 (자막설정 버튼 아래) ──────────────
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showOverlay,
+            enter = androidx.compose.animation.fadeIn(tween(250)) + androidx.compose.animation.slideInHorizontally(tween(300)) { -it },
+            exit = androidx.compose.animation.fadeOut(tween(250)) + androidx.compose.animation.slideOutHorizontally(tween(300)) { -it },
+            modifier = Modifier.align(androidx.compose.ui.Alignment.TopStart).padding(top = 90.dp, start = 32.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .wrapContentWidth()
+                    .background(Color.Black.copy(alpha = 0.7f), androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                    ) { resetHideTimer() }
+                    .padding(horizontal = 6.dp, vertical = 8.dp),
+                horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                // ─── 자막크기: 100% [－][↺][＋] ───
+                Text("자막크기", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 5) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleScale = maxOf(0.5f, subtitleScale - 0.15f); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                    Text("${(subtitleScale * 100).toInt()}%", color = if (subtitleScale != 1.0f) Color(0xFF80D8FF) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.widthIn(min = 32.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                    Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 6) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleScale = minOf(3.0f, subtitleScale + 0.15f); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                }
+
+                Box(Modifier.width(110.dp).height(1.dp).background(Color.White.copy(alpha = 0.12f)))
+
+                // ─── 자막싱크: 0s [－][↺][＋] ───
+                Text("자막싱크", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 14) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = (subtitleOffsetMs - 500L).coerceIn(-5000L, 5000L); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                    Text(if (subtitleOffsetMs == 0L) "0s" else "${if (subtitleOffsetMs > 0) "+" else ""}${subtitleOffsetMs / 1000f}s", color = if (subtitleOffsetMs != 0L) Color(0xFFFFD54F) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.widthIn(min = 32.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                    Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 15) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = (subtitleOffsetMs + 500L).coerceIn(-5000L, 5000L); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                }
+
+                Box(Modifier.width(110.dp).height(1.dp).background(Color.White.copy(alpha = 0.12f)))
+
+                // ─── 재생속도: 1.0x [－][↺][＋] ───
+                Text("재생속도", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 9) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { currentSpeed = (kotlin.math.round((currentSpeed - 0.1f) * 10f) / 10f).coerceIn(0.1f, 3.0f); exoPlayer.setPlaybackSpeed(currentSpeed); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                    Text("${currentSpeed}x", color = if (currentSpeed != 1.0f) Color(0xFFA5D6A7) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.widthIn(min = 32.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                    Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 7) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { currentSpeed = (kotlin.math.round((currentSpeed + 0.1f) * 10f) / 10f).coerceIn(0.1f, 3.0f); exoPlayer.setPlaybackSpeed(currentSpeed); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                }
+            }
+        }
+
+        // ── 자막 선택 플로팅 버튼 (왼쪽 상단) ──────────────────────
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showOverlay && subtitleTrackLabels.isNotEmpty(),
+            enter = androidx.compose.animation.fadeIn(tween(250)),
+            exit = androidx.compose.animation.fadeOut(tween(250)),
+            modifier = Modifier.align(androidx.compose.ui.Alignment.TopStart).padding(top = 32.dp, start = 32.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    // 크기를 30% 정도 키움
+                    .background(Color.Black.copy(alpha = 0.55f), androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                    .border(1.dp, if (focusedButtonIndex == -100) PrimaryColor else Color.White.copy(alpha = 0.25f), androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                    ) {
+                        showSubtitleDialog = true
+                        resetHideTimer()
+                    }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                contentAlignment = androidx.compose.ui.Alignment.Center
+            ) {
+                Text(
+                    text = "자막설정",
+                    color = if (isSubtitleDisabled) Color.White.copy(alpha = 0.4f) else Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.ExtraBold
+                )
+            }
+        }
+
+        // ── 종료(닫기) 플로팅 버튼 (오른쪽 상단) ──────────────────────
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showOverlay,
+            enter = androidx.compose.animation.fadeIn(tween(250)),
+            exit = androidx.compose.animation.fadeOut(tween(250)),
+            modifier = Modifier.align(androidx.compose.ui.Alignment.TopEnd).padding(top = 48.dp, end = 56.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), androidx.compose.foundation.shape.CircleShape)
+                    .border(2.dp, if (focusedButtonIndex == 12) PrimaryColor else Color.White.copy(alpha = 0.25f), androidx.compose.foundation.shape.CircleShape)
+                    .clickable { executeButton(12) },
+                contentAlignment = androidx.compose.ui.Alignment.Center
+            ) {
+                Text("✕", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             }
         }
 
@@ -3800,6 +3962,110 @@ fun VideoPlayerScreen(
             }
         )
     }
+
+    // ── 자막 선택 다이얼로그 ──────────────────────────────────────
+    if (showSubtitleDialog) {
+        AlertDialog(
+            onDismissRequest = { showSubtitleDialog = false },
+            title = {
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Text("자막설정", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.weight(1f))
+                    Text("${subtitleTrackLabels.size}개", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 400.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    // 끄기 옵션
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp)
+                            .background(
+                                if (isSubtitleDisabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                            )
+                            .clickable {
+                                userManuallySelectedSubtitle = true
+                                trackSelector.setParameters(
+                                    trackSelector.buildUponParameters()
+                                        .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true)
+                                )
+                                isSubtitleDisabled = true
+                                showSubtitleDialog = false
+                            }
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("끄기", fontWeight = if (isSubtitleDisabled) FontWeight.Bold else FontWeight.Normal)
+                            if (isSubtitleDisabled) {
+                                Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(4.dp))
+                    Divider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Spacer(Modifier.height(4.dp))
+
+                    // 자막 트랙 목록
+                    subtitleTrackLabels.forEachIndexed { index, (label, isSelected, mediaTrackGroup) ->
+                        val isActive = !isSubtitleDisabled && isSelected
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 3.dp)
+                                .background(
+                                    if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                    androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                                )
+                                .clickable {
+                                    userManuallySelectedSubtitle = true
+                                    trackSelector.setParameters(
+                                        trackSelector.buildUponParameters()
+                                            .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, false)
+                                            .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_TEXT)
+                                            .setOverrideForType(
+                                                androidx.media3.common.TrackSelectionOverride(mediaTrackGroup, 0)
+                                            )
+                                    )
+                                    isSubtitleDisabled = false
+                                    showSubtitleDialog = false
+                                    android.util.Log.d("VideoPlayerScreen", "User manually selected subtitle track: $label")
+                                }
+                                .padding(horizontal = 12.dp, vertical = 10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(label, fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.weight(1f))
+                                if (isActive) {
+                                    Text(" ✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showSubtitleDialog = false }) {
+                    Text("닫기")
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -3811,7 +4077,7 @@ fun TvControlButton(
     enabled: Boolean = true,
     onClick: () -> Unit = {}
 ) {
-    val size = if (isLarge) 52.dp else 40.dp
+    val size = if (isLarge) 47.dp else 36.dp
     val alpha = if (enabled) 1f else 0.35f
     // Match Stitch design: Large play button is fully colored, others are slightly translucent
     val isPrimaryFilled = isLarge
@@ -3844,7 +4110,88 @@ fun TvControlButton(
     }
 }
 
-
+/** 자막 트랙 라벨 생성 (언어코드 → 한글 언어명 + 부가정보) */
+fun buildSubtitleLabel(language: String?, id: String?, mimeType: String?, trackLabel: String? = null): String {
+    val langName = when (language?.lowercase()) {
+        "ko", "kor" -> "한국어"
+        "en", "eng" -> "영어"
+        "ja", "jpn" -> "일본어"
+        "zh", "zho", "chi", "cmn", "yue" -> "중국어"
+        "fr", "fre", "fra" -> "프랑스어"
+        "de", "ger", "deu" -> "독일어"
+        "es", "spa" -> "스페인어"
+        "pt", "por" -> "포르투갈어"
+        "ru", "rus" -> "러시아어"
+        "ar", "ara" -> "아랍어"
+        "th", "tha" -> "태국어"
+        "vi", "vie" -> "베트남어"
+        "id", "ind" -> "인도네시아어"
+        "ms", "msa", "may" -> "말레이어"
+        "it", "ita" -> "이탈리아어"
+        "nl", "nld", "dut" -> "네덜란드어"
+        "pl", "pol" -> "폴란드어"
+        "tr", "tur" -> "튀르키예어"
+        "uk", "ukr" -> "우크라이나어"
+        "sv", "swe" -> "스웨덴어"
+        "da", "dan" -> "덴마크어"
+        "fi", "fin" -> "핀란드어"
+        "no", "nor", "nob", "nno" -> "노르웨이어"
+        "el", "gre", "ell" -> "그리스어"
+        "cs", "cze", "ces" -> "체코어"
+        "hu", "hun" -> "헝가리어"
+        "ro", "rum", "ron" -> "루마니아어"
+        "bg", "bul" -> "불가리아어"
+        "hr", "hrv" -> "크로아티아어"
+        "sk", "slk", "slo" -> "슬로바키아어"
+        "sl", "slv" -> "슬로베니아어"
+        "sr", "srp" -> "세르비아어"
+        "he", "heb" -> "히브리어"
+        "hi", "hin" -> "힌디어"
+        "bn", "ben" -> "벵골어"
+        "ta", "tam" -> "타밀어"
+        "te", "tel" -> "텔루구어"
+        "ml", "mal" -> "말라얄람어"
+        "ur", "urd" -> "우르두어"
+        "fa", "per", "fas" -> "페르시아어"
+        "sw", "swa" -> "스와힐리어"
+        "tl", "fil" -> "필리핀어"
+        "ca", "cat" -> "카탈루냐어"
+        "eu", "eus", "baq" -> "바스크어"
+        "gl", "glg" -> "갈리시아어"
+        "lt", "lit" -> "리투아니아어"
+        "lv", "lav" -> "라트비아어"
+        "et", "est" -> "에스토니아어"
+        "ka", "kat", "geo" -> "조지아어"
+        "km", "khm" -> "크메르어"
+        "my", "mya", "bur" -> "미얀마어"
+        "mn", "mon" -> "몽골어"
+        "ne", "nep" -> "네팔어"
+        "si", "sin" -> "싱할라어"
+        "lo", "lao" -> "라오어"
+        "mk", "mkd", "mac" -> "마케도니아어"
+        "sq", "sqi", "alb" -> "알바니아어"
+        "bs", "bos" -> "보스니아어"
+        "af", "afr" -> "아프리칸스어"
+        null, "und", "" -> null
+        else -> language
+    }
+    
+    // 부가 정보 (SDH, Forced 등 format.label에서 추출)
+    val extraInfo = when {
+        id == "jsplayer_external_sub" -> "외부"
+        trackLabel != null && (trackLabel.contains("SDH", ignoreCase = true) ||
+            trackLabel.contains("CC", ignoreCase = true)) -> "SDH"
+        trackLabel != null && trackLabel.contains("Forced", ignoreCase = true) -> "강제"
+        trackLabel != null && trackLabel.contains("Commentary", ignoreCase = true) -> "코멘터리"
+        trackLabel != null && trackLabel.contains("Sign", ignoreCase = true) -> "수화"
+        else -> null
+    }
+    
+    return buildString {
+        append(langName ?: trackLabel ?: "자막")
+        if (extraInfo != null) append(" ($extraInfo)")
+    }
+}
 
 
 suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitleUrl: String, ftpEncoding: String = "AUTO", httpHeaders: Map<String, String>? = null, providedExtension: String? = null): Pair<String?, String?> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -4144,6 +4491,7 @@ fun LocalBrowserScreen(
                     SortOrder.NAME_DESC -> "${android.provider.MediaStore.Video.Media.DISPLAY_NAME} DESC"
                     SortOrder.DATE_DESC -> "${android.provider.MediaStore.Video.Media.DATE_ADDED} DESC"
                     SortOrder.DATE_ASC -> "${android.provider.MediaStore.Video.Media.DATE_ADDED} ASC"
+                    SortOrder.PLAYED_DESC -> "${android.provider.MediaStore.Video.Media.DATE_ADDED} DESC"
                 }
 
                 context.contentResolver.query(
@@ -4170,6 +4518,10 @@ fun LocalBrowserScreen(
                         
                         videoList.add(LocalVideoItem(id, contentUri, name, duration, size, path))
                     }
+                }
+                
+                if (sortOrder == SortOrder.PLAYED_DESC) {
+                    videoList.sortByDescending { PlayHistoryStore.getLastPlayed(context, it.uri.toString()) }
                 }
                 
                 videos = videoList

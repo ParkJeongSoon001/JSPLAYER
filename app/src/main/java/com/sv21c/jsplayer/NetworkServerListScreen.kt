@@ -73,7 +73,8 @@ fun NetworkServerListScreen(
 
     fun loadSaved() {
         savedServers = if (serverType == "FTP_SFTP") {
-            CredentialStore.loadByType(context, "FTP") + CredentialStore.loadByType(context, "SFTP")
+            CredentialStore.loadByType(context, "FTP") + 
+            CredentialStore.loadByType(context, "SFTP")
         } else {
             CredentialStore.loadByType(context, serverType)
         }
@@ -615,18 +616,21 @@ fun CredentialInputDialog(
         "SMB" -> "SMB"
         "FTP" -> "FTP"
         "SFTP" -> "SFTP"
+        "FTPS" -> "FTPS"
         else -> "WebDAV"
     }
     val accentColor = when(actualType) {
         "SMB" -> Color(0xFFFF9946)
         "FTP" -> Color(0xFF48BB78)
         "SFTP" -> Color(0xFFF6AD55)
+        "FTPS" -> Color(0xFF9F7AEA)
         else -> Color(0xFF63B3ED)
     }
     val dialIcon = when(actualType) {
         "SMB" -> Icons.Default.Storage
         "FTP" -> Icons.Default.Storage
         "SFTP" -> Icons.Default.AccountBox
+        "FTPS" -> Icons.Default.Security
         else -> Icons.Default.Cloud
     }
 
@@ -784,6 +788,7 @@ fun CredentialInputDialog(
                             "SMB" -> "smb"
                             "FTP" -> "ftp"
                             "SFTP" -> "sftp"
+                            "FTPS" -> "ftps"
                             "WEBDAV" -> "http"
                             else -> "http"
                         }

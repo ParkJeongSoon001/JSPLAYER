@@ -88,11 +88,13 @@ fun NetworkBrowseScreen(
                         .map { list -> list as List<Any> }
                     "WEBDAV" -> WebDavManager.listFiles(path, credentials.username, credentials.password)
                         .map { list -> list as List<Any> }
-                    "FTP" -> {
+                    "FTP", "FTPS" -> {
                         val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
-                        val ftpHost = uri?.host ?: credentials.host.removePrefix("ftp://").split("/")[0].split(":")[0]
+                        val scheme = if (credentials.type == "FTPS") "ftps://" else "ftp://"
+                        val ftpHost = uri?.host ?: credentials.host.removePrefix(scheme).split("/")[0].split(":")[0]
                         val ftpPort = uri?.port?.takeIf { it > 0 } ?: 21
-                        FtpManager.listFiles(ftpHost, ftpPort, credentials.username, credentials.password, path, credentials.encoding)
+                        val isFtps = credentials.type == "FTPS"
+                        FtpManager.listFiles(ftpHost, ftpPort, credentials.username, credentials.password, path, credentials.encoding, isFtps)
                             .map { list -> list as List<Any> }
                     }
                     "SFTP" -> {
@@ -302,6 +304,13 @@ fun NetworkBrowseScreen(
                                 SortOrder.NAME_DESC -> name2.compareTo(name1, ignoreCase = true)
                                 SortOrder.DATE_DESC -> time2.compareTo(time1)
                                 SortOrder.DATE_ASC -> time1.compareTo(time2)
+                                SortOrder.PLAYED_DESC -> {
+                                    val url1 = getTargetPlayUrl(o1, credentials)
+                                    val url2 = getTargetPlayUrl(o2, credentials)
+                                    val played1 = PlayHistoryStore.getLastPlayed(context, url1)
+                                    val played2 = PlayHistoryStore.getLastPlayed(context, url2)
+                                    played2.compareTo(played1)
+                                }
                             }
                         }
                     }
@@ -388,14 +397,7 @@ fun NetworkBrowseScreen(
                                 )
                                 // 저장된 재생 위치 표시 (시간 + 프로그레스 바)
                                 if (isVideo) {
-                                    val playUrlForSave = when (credentials.type) {
-                                        "WEBDAV" -> WebDavManager.buildAuthUrl(path, credentials.username, credentials.password)
-                                        "SMB" -> if (credentials.username.isNotBlank()) {
-                                            val authStr = "${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@"
-                                            path.replaceFirst("smb://", "smb://$authStr")
-                                        } else path
-                                        else -> path
-                                    }
+                                    val playUrlForSave = getTargetPlayUrl(item, credentials)
                                     val savedPos = PlaybackPositionStore.getPosition(context, playUrlForSave)
                                     if (savedPos > 0L) {
                                         val savedDur = PlaybackPositionStore.getDuration(context, playUrlForSave)
@@ -469,14 +471,15 @@ private fun handleVideoClick(
                 val authStr = "${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@"
                 path.replaceFirst("smb://", "smb://$authStr")
             } else path
-            "FTP" -> {
+            "FTP", "FTPS" -> {
                 val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
-                val ftpHost = uri?.host ?: credentials.host.removePrefix("ftp://").split("/")[0].split(":")[0]
+                val scheme = if (credentials.type == "FTPS") "ftps://" else "ftp://"
+                val ftpHost = uri?.host ?: credentials.host.removePrefix(scheme).split("/")[0].split(":")[0]
                 val ftpPort = uri?.port?.takeIf { it > 0 } ?: 21
                 val portStr = if (ftpPort != 21) ":$ftpPort" else ""
                 val normPath = if (path.startsWith("./")) path.substring(1) else (if (path.startsWith("/")) path else "/$path")
                 val encodedPath = normPath.split("/").joinToString("/") { android.net.Uri.encode(it) }
-                "ftp://${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$ftpHost$portStr$encodedPath"
+                "$scheme${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$ftpHost$portStr$encodedPath"
             }
             "SFTP" -> {
                 val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
@@ -527,14 +530,15 @@ private fun handleVideoClick(
                 val authStr = "${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@"
                 sPath.replaceFirst("smb://", "smb://$authStr")
             } else sPath
-            "FTP" -> {
+            "FTP", "FTPS" -> {
                 val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
-                val ftpHost = uri?.host ?: credentials.host.removePrefix("ftp://").split("/")[0].split(":")[0]
+                val scheme = if (credentials.type == "FTPS") "ftps://" else "ftp://"
+                val ftpHost = uri?.host ?: credentials.host.removePrefix(scheme).split("/")[0].split(":")[0]
                 val ftpPort = uri?.port?.takeIf { it > 0 } ?: 21
                 val portStr = if (ftpPort != 21) ":$ftpPort" else ""
                 val normSPath = if (sPath.startsWith("./")) sPath.substring(1) else (if (sPath.startsWith("/")) sPath else "/$sPath")
                 val encodedSPath = normSPath.split("/").joinToString("/") { android.net.Uri.encode(it) }
-                "ftp://${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$ftpHost$portStr$encodedSPath"
+                "$scheme${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$ftpHost$portStr$encodedSPath"
             }
             "SFTP" -> {
                 val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
@@ -586,14 +590,15 @@ private fun handleVideoClick(
                 val auth = "${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@"
                 itPath.replaceFirst("smb://", "smb://$auth")
             } else itPath
-            "FTP" -> {
+            "FTP", "FTPS" -> {
                 val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
-                val ftpHost = uri?.host ?: credentials.host.removePrefix("ftp://").split("/")[0].split(":")[0]
+                val scheme = if (credentials.type == "FTPS") "ftps://" else "ftp://"
+                val ftpHost = uri?.host ?: credentials.host.removePrefix(scheme).split("/")[0].split(":")[0]
                 val ftpPort = uri?.port?.takeIf { it > 0 } ?: 21
                 val portStr = if (ftpPort != 21) ":$ftpPort" else ""
                 val normItPath = if (itPath.startsWith("./")) itPath.substring(1) else (if (itPath.startsWith("/")) itPath else "/$itPath")
                 val encodedItPath = normItPath.split("/").joinToString("/") { android.net.Uri.encode(it) }
-                "ftp://${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$ftpHost$portStr$encodedItPath"
+                "$scheme${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$ftpHost$portStr$encodedItPath"
             }
             "SFTP" -> {
                 val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
@@ -662,14 +667,15 @@ private fun handleVideoClick(
                 val authSubUrl = when (credentials.type) {
                     "WEBDAV" -> WebDavManager.buildAuthUrl(sPath, credentials.username, credentials.password)
                     "SMB" -> if (credentials.username.isNotBlank()) sPath.replaceFirst("smb://", "smb://${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@") else sPath
-                    "FTP" -> {
+                    "FTP", "FTPS" -> {
                         val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
-                        val ftpHost = uri?.host ?: credentials.host.removePrefix("ftp://").split("/")[0].split(":")[0]
+                        val scheme = if (credentials.type == "FTPS") "ftps://" else "ftp://"
+                        val ftpHost = uri?.host ?: credentials.host.removePrefix(scheme).split("/")[0].split(":")[0]
                         val ftpPort = uri?.port?.takeIf { it > 0 } ?: 21
                         val portStr = if (ftpPort != 21) ":$ftpPort" else ""
                         val normSPath = if (sPath.startsWith("./")) sPath.substring(1) else (if (sPath.startsWith("/")) sPath else "/$sPath")
                         val encodedSPath = normSPath.split("/").joinToString("/") { android.net.Uri.encode(it) }
-                        "ftp://${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$ftpHost$portStr$encodedSPath"
+                        "$scheme${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$ftpHost$portStr$encodedSPath"
                     }
                     "SFTP" -> {
                         val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
@@ -736,3 +742,44 @@ private fun handleVideoClick(
 
 // 4개 요소를 가진 destructuring 헬퍼
 private data class Quadruple<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
+
+private fun getTargetPlayUrl(item: Any, credentials: ServerCredentials): String {
+    val path = when (item) {
+        is SmbItem -> item.path
+        is WebDavItem -> item.href
+        is FtpItem -> item.path
+        is SftpItem -> item.path
+        is GoogleDriveItem -> item.id
+        is OneDriveItem -> item.downloadUrl ?: item.id
+        else -> ""
+    }
+    return when (credentials.type) {
+        "WEBDAV" -> WebDavManager.buildAuthUrl(path, credentials.username, credentials.password)
+        "SMB" -> if (credentials.username.isNotBlank()) {
+            val authStr = "${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@"
+            path.replaceFirst("smb://", "smb://$authStr")
+        } else path
+        "FTP", "FTPS" -> {
+            val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
+            val scheme = if (credentials.type == "FTPS") "ftps://" else "ftp://"
+            val ftpHost = uri?.host ?: credentials.host.removePrefix(scheme).split("/")[0].split(":")[0]
+            val ftpPort = uri?.port?.takeIf { it > 0 } ?: 21
+            val portStr = if (ftpPort != 21) ":$ftpPort" else ""
+            val normPath = if (path.startsWith("./")) path.substring(1) else (if (path.startsWith("/")) path else "/$path")
+            val encodedPath = normPath.split("/").joinToString("/") { android.net.Uri.encode(it) }
+            "$scheme${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$ftpHost$portStr$encodedPath"
+        }
+        "SFTP" -> {
+            val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
+            val sftpHost = uri?.host ?: credentials.host.removePrefix("sftp://").split("/")[0].split(":")[0]
+            val sftpPort = uri?.port?.takeIf { it > 0 } ?: 22
+            val portStr = if (sftpPort != 22) ":$sftpPort" else ""
+            val normPath = if (path.startsWith("./")) path.substring(1) else (if (path.startsWith("/")) path else "/$path")
+            val encodedPath = normPath.split("/").joinToString("/") { android.net.Uri.encode(it) }
+            "sftp://${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$sftpHost$portStr$encodedPath"
+        }
+        "GOOGLE_DRIVE" -> GoogleDriveManager.getStreamUrl(path)
+        "ONEDRIVE" -> if (path.startsWith("http")) path else OneDriveManager.getStreamUrl(path)
+        else -> path
+    }
+}
