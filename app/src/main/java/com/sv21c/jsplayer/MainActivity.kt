@@ -192,7 +192,7 @@ class MainActivity : ComponentActivity() {
                 if (result.success) {
                     // 설치 성공 직후 다시 로딩 시도 (현재 세션에서 사용 가능하도록)
                     val loaded = FfmpegLoader.initialize(this@MainActivity)
-                    codecInstallResultMessage.value = "설치 성공: 고덱이 성공적으로 설치 및 로드되었습니다." + 
+                    codecInstallResultMessage.value = "설치 성공: 코덱이 성공적으로 설치 및 로드되었습니다." +
                         if (loaded) "\n(즉시 적용됨)" else "\n(적용을 위해 앱 재시작을 권장합니다)"
                 } else {
                     codecInstallResultMessage.value = "설치 실패: ${result.message}"
@@ -3413,13 +3413,16 @@ fun VideoPlayerScreen(
             modifier = Modifier.align(androidx.compose.ui.Alignment.BottomCenter)
         ) {
             val progress = (currentPosition.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f)
+            val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+            val isPortrait = configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+            
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(
                         Brush.verticalGradient(listOf(Color.Transparent, Color(0xE6180F23), Color(0xFF180F23)))
                     )
-                    .padding(start = 72.dp, end = 72.dp, top = 20.dp, bottom = 8.dp)
+                    .padding(start = 72.dp, end = 72.dp, top = 20.dp, bottom = if (isPortrait) 56.dp else 8.dp)
             ) {
                 // Title
                 Text(
@@ -3468,9 +3471,6 @@ fun VideoPlayerScreen(
                 }
 
                 // Control buttons row
-                val configuration = androidx.compose.ui.platform.LocalConfiguration.current
-                val isPortrait = configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-
                 if (isPortrait) {
                     Column(
                         modifier = Modifier.fillMaxWidth(),
