@@ -395,7 +395,7 @@ class MainActivity : ComponentActivity() {
                 var backPressedTime by remember { mutableStateOf(0L) }
                 var browsingDeviceOverride: Device<*, *, *>? by remember { mutableStateOf(null) }
                 var localBrowsingActiveMode: Boolean by remember { mutableStateOf(false) }
-                var localSortOrder by remember { mutableStateOf(SortOrder.NAME_ASC) }
+                var localSortOrder by remember { mutableStateOf(SettingsStore.getSortOrder(this@MainActivity)) }
                 var networkSortOrder by remember { mutableStateOf(SettingsStore.getSortOrder(this@MainActivity)) }
                 var localViewMode by remember { mutableStateOf(SettingsStore.getLocalViewMode(this@MainActivity)) }
                 var localSelectedFolder by remember { mutableStateOf<String?>(null) }
@@ -4623,6 +4623,7 @@ fun LocalBrowserScreen(
                                 text = { Text(order.displayName) },
                                 onClick = {
                                     onSortOrderChange(order)
+                                    SettingsStore.saveSortOrder(context, order)
                                     sortMenuExpanded = false
                                 },
                                 leadingIcon = {
