@@ -80,6 +80,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import android.content.pm.ActivityInfo
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
@@ -2490,6 +2492,14 @@ fun VideoPlayerScreen(
     var subtitleTrackLabels by remember { mutableStateOf<List<Triple<String, Boolean, androidx.media3.common.TrackGroup>>>(emptyList()) }
     var isSubtitleDisabled by remember { mutableStateOf(false) }
     var showSubtitleDialog by remember { mutableStateOf(false) }
+    var showPlayerSettingsDialog by remember { mutableStateOf(false) }
+    var showProgressBar by remember { mutableStateOf(SettingsStore.getShowProgressBar(context)) }
+    var showPlayTime by remember { mutableStateOf(SettingsStore.getShowPlayTime(context)) }
+    var seekTime by remember { mutableIntStateOf(SettingsStore.getSeekTime(context)) }
+    var doubleClickSeekTime by remember { mutableIntStateOf(SettingsStore.getDoubleClickSeekTime(context)) }
+    var remoteSeekTime by remember { mutableIntStateOf(SettingsStore.getRemoteSeekTime(context)) }
+    var bluetoothSeekTime by remember { mutableIntStateOf(SettingsStore.getBluetoothSeekTime(context)) }
+    var autoHideTime by remember { mutableIntStateOf(SettingsStore.getAutoHideTime(context)) }
     var userManuallySelectedSubtitle by remember { mutableStateOf(false) }
     var currentPosition by remember { mutableLongStateOf(0L) }
     var totalDuration by remember { mutableLongStateOf(1L) }
@@ -3065,10 +3075,10 @@ fun VideoPlayerScreen(
     // onKeyDown/onKeyUp (Activity 레벨)에서 triggerBack()을 호출하므로
     // 컨트롤 토글은 triggerBack() 내부에서 isVideoControlVisible로 처리됨
 
-    // --- Auto-hide timer (3s) ---
+    // --- Auto-hide timer ---
     LaunchedEffect(isControlVisible, hideTimerKey) {
         if (isControlVisible) {
-            delay(3000L)
+            delay(autoHideTime * 1000L)
             onControlVisibilityChange(false)
         }
     }
@@ -3095,9 +3105,9 @@ fun VideoPlayerScreen(
                     return
                 }
             }
-            1 -> exoPlayer.seekTo((exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L))
+            1 -> exoPlayer.seekTo((exoPlayer.currentPosition - seekTime * 1000L).coerceAtLeast(0L))
             2 -> if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
-            3 -> exoPlayer.seekTo((exoPlayer.currentPosition + 10_000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
+            3 -> exoPlayer.seekTo((exoPlayer.currentPosition + seekTime * 1000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
             4 -> { // 다음 동영상
                 if (hasNext) {
                     val nextItem = playlist[currentIndex + 1]
@@ -3127,6 +3137,7 @@ fun VideoPlayerScreen(
             14 -> subtitleOffsetMs = (subtitleOffsetMs - 500L).coerceIn(-5000L, 5000L)
             15 -> subtitleOffsetMs = (subtitleOffsetMs + 500L).coerceIn(-5000L, 5000L)
             -100 -> showSubtitleDialog = true
+            -101 -> showPlayerSettingsDialog = true
         }
         resetHideTimer()
     }
@@ -3153,13 +3164,13 @@ fun VideoPlayerScreen(
                         if (currentIsControlVisible) return@detectTapGestures
                         val screenWidth = size.width
                         if (offset.x < screenWidth / 2f) {
-                            exoPlayer.seekTo((exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L))
-                            seekIndicatorText = "-10초"
+                            exoPlayer.seekTo((exoPlayer.currentPosition - doubleClickSeekTime * 1000L).coerceAtLeast(0L))
+                            seekIndicatorText = "-${doubleClickSeekTime}초"
                             showSeekIndicator = true
                         } else {
                             val duration = exoPlayer.duration.coerceAtLeast(0L)
-                            exoPlayer.seekTo((exoPlayer.currentPosition + 10_000L).coerceAtMost(duration))
-                            seekIndicatorText = "+10초"
+                            exoPlayer.seekTo((exoPlayer.currentPosition + doubleClickSeekTime * 1000L).coerceAtMost(duration))
+                            seekIndicatorText = "+${doubleClickSeekTime}초"
                             showSeekIndicator = true
                         }
                     }
@@ -3283,14 +3294,15 @@ fun VideoPlayerScreen(
                                         2 -> 1
                                         3 -> 2
                                         4 -> 3
-                                        11 -> 10
+                                        0 -> 10
+                                        11 -> 4
                                         13 -> 11
                                         else -> focusedButtonIndex
                                     }
                                 }
                                 resetHideTimer()
                             } else {
-                                exoPlayer.seekTo((exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L))
+                                exoPlayer.seekTo((exoPlayer.currentPosition - remoteSeekTime * 1000L).coerceAtLeast(0L))
                             }
                             true
                         }
@@ -3305,19 +3317,28 @@ fun VideoPlayerScreen(
                                         9 -> 7
                                         -100 -> 12 // Subtitle Settings -> Close
                                         6, 15, 7 -> 12 // Right from left panel -> Close
+                                        10 -> 0
                                         0 -> 1
                                         1 -> 2
                                         2 -> 3
                                         3 -> 4
-                                        10 -> 11
+                                        4 -> 11
                                         11 -> 13
                                         else -> focusedButtonIndex
                                     }
                                 }
                                 resetHideTimer()
                             } else {
-                                exoPlayer.seekTo((exoPlayer.currentPosition + 10_000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
+                                exoPlayer.seekTo((exoPlayer.currentPosition + remoteSeekTime * 1000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
                             }
+                            true
+                        }
+                        Key.MediaPrevious -> {
+                            exoPlayer.seekTo((exoPlayer.currentPosition - bluetoothSeekTime * 1000L).coerceAtLeast(0L))
+                            true
+                        }
+                        Key.MediaNext -> {
+                            exoPlayer.seekTo((exoPlayer.currentPosition + bluetoothSeekTime * 1000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
                             true
                         }
                         Key.DirectionUp -> {
@@ -3330,6 +3351,7 @@ fun VideoPlayerScreen(
                                     9, 7 -> 14 // Speed -> Sync
                                     14, 15 -> 5 // Sync -> Size
                                     5, 6 -> -100 // Size -> Subtitle Settings
+                                    -100 -> -101 // Subtitle Settings -> Player Settings
                                     12 -> 12 // Close stays
                                     else -> focusedButtonIndex
                                 }
@@ -3342,6 +3364,7 @@ fun VideoPlayerScreen(
                         Key.DirectionDown -> {
                             if (isControlVisible) {
                                 focusedButtonIndex = when (focusedButtonIndex) {
+                                    -101 -> -100 // Player Settings -> Subtitle Settings
                                     -100 -> 5 // Subtitle Settings -> Size Minus
                                     12 -> 100 // Close -> Slider
                                     5, 6 -> 14 // Size -> Sync
@@ -3363,7 +3386,19 @@ fun VideoPlayerScreen(
                             // onKeyDown/onKeyUp에서 triggerBack()이 컨트롤하므로 여기서는 처리 안 함
                             false 
                         }
-                        else -> false
+                        else -> {
+                            when (event.nativeKeyEvent.keyCode) {
+                                android.view.KeyEvent.KEYCODE_BUTTON_L1 -> {
+                                    exoPlayer.seekTo((exoPlayer.currentPosition - bluetoothSeekTime * 1000L).coerceAtLeast(0L))
+                                    true
+                                }
+                                android.view.KeyEvent.KEYCODE_BUTTON_R1 -> {
+                                    exoPlayer.seekTo((exoPlayer.currentPosition + bluetoothSeekTime * 1000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
+                                    true
+                                }
+                                else -> false
+                            }
+                        }
                     }
                 } else false
             }
@@ -3436,38 +3471,43 @@ fun VideoPlayerScreen(
                 )
 
                 // Progress Slider (Interactive)
-                Slider(
-                    value = if (isDragging) dragPosition.toFloat() else currentPosition.toFloat(),
-                    onValueChange = { 
-                        isDragging = true
-                        dragPosition = it.toLong()
-                        resetHideTimer()
-                    },
-                    onValueChangeFinished = {
-                        exoPlayer.seekTo(dragPosition)
-                        isDragging = false
-                    },
-                    valueRange = 0f..totalDuration.toFloat().coerceAtLeast(1f),
-                    colors = SliderDefaults.colors(
-                        thumbColor = PrimaryColor,
-                        activeTrackColor = PrimaryColor,
-                        inactiveTrackColor = Color.White.copy(alpha = 0.24f)
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 0.dp)
-                        .border(
-                            width = if (focusedButtonIndex == 100) 3.dp else 0.dp,
-                            color = if (focusedButtonIndex == 100) PrimaryColor else Color.Transparent,
-                            shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp)
-                        )
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 14.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(formatSrtTime(currentPosition).substringBefore(","), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
-                    Text(formatSrtTime(totalDuration).substringBefore(","), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
+                if (showProgressBar) {
+                    Slider(
+                        value = if (isDragging) dragPosition.toFloat() else currentPosition.toFloat(),
+                        onValueChange = { 
+                            isDragging = true
+                            dragPosition = it.toLong()
+                            resetHideTimer()
+                        },
+                        onValueChangeFinished = {
+                            exoPlayer.seekTo(dragPosition)
+                            isDragging = false
+                        },
+                        valueRange = 0f..totalDuration.toFloat().coerceAtLeast(1f),
+                        colors = SliderDefaults.colors(
+                            thumbColor = PrimaryColor,
+                            activeTrackColor = PrimaryColor,
+                            inactiveTrackColor = Color.White.copy(alpha = 0.24f)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 0.dp)
+                            .border(
+                                width = if (focusedButtonIndex == 100) 3.dp else 0.dp,
+                                color = if (focusedButtonIndex == 100) PrimaryColor else Color.Transparent,
+                                shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp)
+                            )
+                    )
+                }
+                
+                if (showPlayTime) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(formatSrtTime(currentPosition).substringBefore(","), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
+                        Text(formatSrtTime(totalDuration).substringBefore(","), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
+                    }
                 }
 
                 // Control buttons row
@@ -3482,11 +3522,11 @@ fun VideoPlayerScreen(
                         ) {
                             TvControlButton(label = "⏮\n이전", isFocused = focusedButtonIndex == 0, highlightColor = PrimaryColor, onClick = { executeButton(0) }, enabled = hasPrevious)
                             Spacer(Modifier.width(8.dp))
-                            TvControlButton(label = "◀◀\n-10초", isFocused = focusedButtonIndex == 1, highlightColor = PrimaryColor, onClick = { executeButton(1) })
+                            TvControlButton(label = "◀◀\n-${seekTime}초", isFocused = focusedButtonIndex == 1, highlightColor = PrimaryColor, onClick = { executeButton(1) })
                             Spacer(Modifier.width(8.dp))
                             TvControlButton(label = if (isPlaying) "⏸" else "▶", isFocused = focusedButtonIndex == 2, highlightColor = PrimaryColor, isLarge = true, onClick = { executeButton(2) })
                             Spacer(Modifier.width(8.dp))
-                            TvControlButton(label = "+10초\n▶▶", isFocused = focusedButtonIndex == 3, highlightColor = PrimaryColor, onClick = { executeButton(3) })
+                            TvControlButton(label = "+${seekTime}초\n▶▶", isFocused = focusedButtonIndex == 3, highlightColor = PrimaryColor, onClick = { executeButton(3) })
                             Spacer(Modifier.width(8.dp))
                             TvControlButton(label = "⏭\n다음", isFocused = focusedButtonIndex == 4, highlightColor = PrimaryColor, onClick = { executeButton(4) }, enabled = hasNext)
                         }
@@ -3510,11 +3550,11 @@ fun VideoPlayerScreen(
                     ) {
                         TvControlButton(label = "⏮\n이전", isFocused = focusedButtonIndex == 0, highlightColor = PrimaryColor, onClick = { executeButton(0) }, enabled = hasPrevious)
                         Spacer(Modifier.width(8.dp))
-                        TvControlButton(label = "◀◀\n-10초", isFocused = focusedButtonIndex == 1, highlightColor = PrimaryColor, onClick = { executeButton(1) })
+                        TvControlButton(label = "◀◀\n-${seekTime}초", isFocused = focusedButtonIndex == 1, highlightColor = PrimaryColor, onClick = { executeButton(1) })
                         Spacer(Modifier.width(8.dp))
                         TvControlButton(label = if (isPlaying) "⏸" else "▶", isFocused = focusedButtonIndex == 2, highlightColor = PrimaryColor, isLarge = true, onClick = { executeButton(2) })
                         Spacer(Modifier.width(8.dp))
-                        TvControlButton(label = "+10초\n▶▶", isFocused = focusedButtonIndex == 3, highlightColor = PrimaryColor, onClick = { executeButton(3) })
+                        TvControlButton(label = "+${seekTime}초\n▶▶", isFocused = focusedButtonIndex == 3, highlightColor = PrimaryColor, onClick = { executeButton(3) })
                         Spacer(Modifier.width(8.dp))
                         TvControlButton(label = "⏭\n다음", isFocused = focusedButtonIndex == 4, highlightColor = PrimaryColor, onClick = { executeButton(4) }, enabled = hasNext)
                         Spacer(Modifier.width(16.dp))
@@ -3644,35 +3684,63 @@ fun VideoPlayerScreen(
             }
         }
 
-        // ── 자막 선택 플로팅 버튼 (왼쪽 상단) ──────────────────────
+        // ── 플로팅 설정 버튼 (왼쪽 상단) ──────────────────────
         androidx.compose.animation.AnimatedVisibility(
-            visible = showOverlay && subtitleTrackLabels.isNotEmpty(),
+            visible = showOverlay,
             enter = androidx.compose.animation.fadeIn(tween(250)),
             exit = androidx.compose.animation.fadeOut(tween(250)),
-            modifier = Modifier.align(androidx.compose.ui.Alignment.TopStart).padding(top = 32.dp, start = 32.dp)
+            modifier = Modifier.align(androidx.compose.ui.Alignment.TopStart).padding(top = 8.dp, start = 16.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    // 크기를 30% 정도 키움
-                    .background(Color.Black.copy(alpha = 0.55f), androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
-                    .border(1.dp, if (focusedButtonIndex == -100) PrimaryColor else Color.White.copy(alpha = 0.25f), androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                // 플레이 설정 버튼
+                Box(
+                    modifier = Modifier
+                        .background(Color.Black.copy(alpha = 0.55f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                        .border(1.dp, if (focusedButtonIndex == -101) PrimaryColor else Color.White.copy(alpha = 0.25f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                        ) {
+                            showPlayerSettingsDialog = true
+                            resetHideTimer()
+                        }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    contentAlignment = androidx.compose.ui.Alignment.Center
+                ) {
+                    Text(
+                        text = "플레이설정",
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                // 자막 설정 버튼
+                if (subtitleTrackLabels.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .background(Color.Black.copy(alpha = 0.55f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                            .border(1.dp, if (focusedButtonIndex == -100) PrimaryColor else Color.White.copy(alpha = 0.25f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                            ) {
+                                showSubtitleDialog = true
+                                resetHideTimer()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        contentAlignment = androidx.compose.ui.Alignment.Center
                     ) {
-                        showSubtitleDialog = true
-                        resetHideTimer()
+                        Text(
+                            text = "자막설정",
+                            color = if (isSubtitleDisabled) Color.White.copy(alpha = 0.4f) else Color.White,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                contentAlignment = androidx.compose.ui.Alignment.Center
-            ) {
-                Text(
-                    text = "자막설정",
-                    color = if (isSubtitleDisabled) Color.White.copy(alpha = 0.4f) else Color.White,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.ExtraBold
-                )
+                }
             }
         }
 
@@ -4061,6 +4129,317 @@ fun VideoPlayerScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showSubtitleDialog = false }) {
+                    Text("닫기")
+                }
+            }
+        )
+    }
+
+    // ── 플레이 설정 다이얼로그 ──────────────────────────────────────
+    if (showPlayerSettingsDialog) {
+        AlertDialog(
+            onDismissRequest = { showPlayerSettingsDialog = false },
+            title = {
+                Text("플레이설정", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                androidx.compose.foundation.lazy.LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 400.dp)
+                        .padding(vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    item {
+                        var isFocused by remember { mutableStateOf(false) }
+                        // 프로그래스 바 토글
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged { isFocused = it.hasFocus }
+                                .border(2.dp, if (isFocused) PrimaryColor else Color.Transparent, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .padding(8.dp)
+                                .clickable { 
+                                    showProgressBar = !showProgressBar
+                                    SettingsStore.saveShowProgressBar(context, showProgressBar)
+                                },
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("진행 바 표시", style = MaterialTheme.typography.bodyLarge)
+                            androidx.compose.material3.Switch(
+                                checked = showProgressBar,
+                                onCheckedChange = null
+                            )
+                        }
+                    }
+
+                    item {
+                        var isFocused by remember { mutableStateOf(false) }
+                        // 플레이 시간 표시 토글
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged { isFocused = it.hasFocus }
+                                .border(2.dp, if (isFocused) PrimaryColor else Color.Transparent, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .padding(8.dp)
+                                .clickable { 
+                                    showPlayTime = !showPlayTime
+                                    SettingsStore.saveShowPlayTime(context, showPlayTime)
+                                },
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("플레이 시간 표시", style = MaterialTheme.typography.bodyLarge)
+                            androidx.compose.material3.Switch(
+                                checked = showPlayTime,
+                                onCheckedChange = null
+                            )
+                        }
+                    }
+
+                    item { Divider(color = MaterialTheme.colorScheme.outlineVariant) }
+
+                    item {
+                        var isFocused by remember { mutableStateOf(false) }
+                        // UI 자동 숨김 시간 조절
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged { isFocused = it.hasFocus }
+                                .border(2.dp, if (isFocused) PrimaryColor else Color.Transparent, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .padding(8.dp)
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("메뉴 자동 숨김", style = MaterialTheme.typography.bodyLarge)
+                                Text("${autoHideTime}초", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            }
+                            Slider(
+                                value = autoHideTime.toFloat(),
+                                onValueChange = { 
+                                    autoHideTime = it.toInt()
+                                    SettingsStore.saveAutoHideTime(context, autoHideTime)
+                                },
+                                valueRange = 1f..10f,
+                                steps = 8,
+                                modifier = Modifier.onPreviewKeyEvent { event ->
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        when (event.key) {
+                                            Key.DirectionLeft -> {
+                                                if (autoHideTime > 1) {
+                                                    autoHideTime -= 1
+                                                    SettingsStore.saveAutoHideTime(context, autoHideTime)
+                                                }
+                                                true
+                                            }
+                                            Key.DirectionRight -> {
+                                                if (autoHideTime < 10) {
+                                                    autoHideTime += 1
+                                                    SettingsStore.saveAutoHideTime(context, autoHideTime)
+                                                }
+                                                true
+                                            }
+                                            else -> false
+                                        }
+                                    } else false
+                                }
+                            )
+                        }
+                    }
+
+                    item { Divider(color = MaterialTheme.colorScheme.outlineVariant) }
+
+                    item {
+                        var isFocused by remember { mutableStateOf(false) }
+                        // 버튼 이동 시간 조절
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged { isFocused = it.hasFocus }
+                                .border(2.dp, if (isFocused) PrimaryColor else Color.Transparent, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .padding(8.dp)
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("하단 버튼 Seek", style = MaterialTheme.typography.bodyLarge)
+                                Text("${seekTime}초", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            }
+                            Slider(
+                                value = seekTime.toFloat(),
+                                onValueChange = { 
+                                    seekTime = it.toInt()
+                                    SettingsStore.saveSeekTime(context, seekTime)
+                                },
+                                valueRange = 1f..30f,
+                                steps = 28,
+                                modifier = Modifier.onPreviewKeyEvent { event ->
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        when (event.key) {
+                                            Key.DirectionLeft -> {
+                                                if (seekTime > 1) {
+                                                    seekTime -= 1
+                                                    SettingsStore.saveSeekTime(context, seekTime)
+                                                }
+                                                true
+                                            }
+                                            Key.DirectionRight -> {
+                                                if (seekTime < 30) {
+                                                    seekTime += 1
+                                                    SettingsStore.saveSeekTime(context, seekTime)
+                                                }
+                                                true
+                                            }
+                                            else -> false
+                                        }
+                                    } else false
+                                }
+                            )
+                        }
+                    }
+
+                    item {
+                        var isFocused by remember { mutableStateOf(false) }
+                        // 더블클릭 이동 시간 조절
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged { isFocused = it.hasFocus }
+                                .border(2.dp, if (isFocused) PrimaryColor else Color.Transparent, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .padding(8.dp)
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("더블클릭 Seek", style = MaterialTheme.typography.bodyLarge)
+                                Text("${doubleClickSeekTime}초", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            }
+                            Slider(
+                                value = doubleClickSeekTime.toFloat(),
+                                onValueChange = { 
+                                    doubleClickSeekTime = it.toInt()
+                                    SettingsStore.saveDoubleClickSeekTime(context, doubleClickSeekTime)
+                                },
+                                valueRange = 1f..30f,
+                                steps = 28,
+                                modifier = Modifier.onPreviewKeyEvent { event ->
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        when (event.key) {
+                                            Key.DirectionLeft -> {
+                                                if (doubleClickSeekTime > 1) {
+                                                    doubleClickSeekTime -= 1
+                                                    SettingsStore.saveDoubleClickSeekTime(context, doubleClickSeekTime)
+                                                }
+                                                true
+                                            }
+                                            Key.DirectionRight -> {
+                                                if (doubleClickSeekTime < 30) {
+                                                    doubleClickSeekTime += 1
+                                                    SettingsStore.saveDoubleClickSeekTime(context, doubleClickSeekTime)
+                                                }
+                                                true
+                                            }
+                                            else -> false
+                                        }
+                                    } else false
+                                }
+                            )
+                        }
+                    }
+
+                    item {
+                        var isFocused by remember { mutableStateOf(false) }
+                        // TV 리모컨 좌/우 이동 시간 조절
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged { isFocused = it.hasFocus }
+                                .border(2.dp, if (isFocused) PrimaryColor else Color.Transparent, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .padding(8.dp)
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("리모컨 Seek", style = MaterialTheme.typography.bodyLarge)
+                                Text("${remoteSeekTime}초", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            }
+                            Slider(
+                                value = remoteSeekTime.toFloat(),
+                                onValueChange = { 
+                                    remoteSeekTime = it.toInt()
+                                    SettingsStore.saveRemoteSeekTime(context, remoteSeekTime)
+                                },
+                                valueRange = 1f..30f,
+                                steps = 28,
+                                modifier = Modifier.onPreviewKeyEvent { event ->
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        when (event.key) {
+                                            Key.DirectionLeft -> {
+                                                if (remoteSeekTime > 1) {
+                                                    remoteSeekTime -= 1
+                                                    SettingsStore.saveRemoteSeekTime(context, remoteSeekTime)
+                                                }
+                                                true
+                                            }
+                                            Key.DirectionRight -> {
+                                                if (remoteSeekTime < 30) {
+                                                    remoteSeekTime += 1
+                                                    SettingsStore.saveRemoteSeekTime(context, remoteSeekTime)
+                                                }
+                                                true
+                                            }
+                                            else -> false
+                                        }
+                                    } else false
+                                }
+                            )
+                        }
+                    }
+
+                    item {
+                        var isFocused by remember { mutableStateOf(false) }
+                        // 블루투스 컨트롤러 L/R 이동 시간 조절
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged { isFocused = it.hasFocus }
+                                .border(2.dp, if (isFocused) PrimaryColor else Color.Transparent, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .padding(8.dp)
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("블투 Seek", style = MaterialTheme.typography.bodyLarge)
+                                Text("${bluetoothSeekTime}초", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            }
+                            Slider(
+                                value = bluetoothSeekTime.toFloat(),
+                                onValueChange = { 
+                                    bluetoothSeekTime = it.toInt()
+                                    SettingsStore.saveBluetoothSeekTime(context, bluetoothSeekTime)
+                                },
+                                valueRange = 1f..30f,
+                                steps = 28,
+                                modifier = Modifier.onPreviewKeyEvent { event ->
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        when (event.key) {
+                                            Key.DirectionLeft -> {
+                                                if (bluetoothSeekTime > 1) {
+                                                    bluetoothSeekTime -= 1
+                                                    SettingsStore.saveBluetoothSeekTime(context, bluetoothSeekTime)
+                                                }
+                                                true
+                                            }
+                                            Key.DirectionRight -> {
+                                                if (bluetoothSeekTime < 30) {
+                                                    bluetoothSeekTime += 1
+                                                    SettingsStore.saveBluetoothSeekTime(context, bluetoothSeekTime)
+                                                }
+                                                true
+                                            }
+                                            else -> false
+                                        }
+                                    } else false
+                                }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPlayerSettingsDialog = false }) {
                     Text("닫기")
                 }
             }
