@@ -2493,6 +2493,8 @@ fun VideoPlayerScreen(
     var isSubtitleDisabled by remember { mutableStateOf(false) }
     var showSubtitleDialog by remember { mutableStateOf(false) }
     var showPlayerSettingsDialog by remember { mutableStateOf(false) }
+    // 음성 트랙 선택 UI 상태
+    var audioTrackLabels by remember { mutableStateOf<List<Triple<String, Boolean, androidx.media3.common.TrackGroup>>>(emptyList()) }
     var showProgressBar by remember { mutableStateOf(SettingsStore.getShowProgressBar(context)) }
     var showPlayTime by remember { mutableStateOf(SettingsStore.getShowPlayTime(context)) }
     var seekTime by remember { mutableIntStateOf(SettingsStore.getSeekTime(context)) }
@@ -3035,6 +3037,21 @@ fun VideoPlayerScreen(
                 // UI 상태 업데이트
                 subtitleTrackLabels = collectedTracks
                 
+                // 오디오 트랙 목록 수집 (UI 표시용)
+                val collectedAudioTracks = mutableListOf<Triple<String, Boolean, androidx.media3.common.TrackGroup>>()
+                for (group in tracks.groups) {
+                    if (group.type != androidx.media3.common.C.TRACK_TYPE_AUDIO) continue
+                    for (trackIdx in 0 until group.mediaTrackGroup.length) {
+                        val format = group.mediaTrackGroup.getFormat(trackIdx)
+                        val label = buildAudioTrackLabel(format)
+                        val selected = group.isTrackSelected(trackIdx)
+                        collectedAudioTracks.add(Triple(label, selected, group.mediaTrackGroup))
+                        android.util.Log.d("VideoPlayerScreen", "  AUDIO track: $label, selected=$selected, mime=${format.sampleMimeType}, ch=${format.channelCount}")
+                    }
+                }
+                audioTrackLabels = collectedAudioTracks
+                android.util.Log.d("VideoPlayerScreen", "Collected ${collectedAudioTracks.size} audio tracks")
+                
                 // 사용자가 수동 선택한 경우 자동선택 건너뛰기
                 if (userManuallySelectedSubtitle) {
                     android.util.Log.d("VideoPlayerScreen", "Skipping auto-selection: user manually selected subtitle")
@@ -3289,7 +3306,7 @@ fun VideoPlayerScreen(
                                         6 -> 5
                                         15 -> 14
                                         7 -> 9
-                                        12 -> -100 // Close -> Subtitle Settings
+                                        12 -> -100 // Close -> Subtitle/Audio Settings
                                         1 -> 0
                                         2 -> 1
                                         3 -> 2
@@ -3315,7 +3332,7 @@ fun VideoPlayerScreen(
                                         5 -> 6
                                         14 -> 15
                                         9 -> 7
-                                        -100 -> 12 // Subtitle Settings -> Close
+                                        -100 -> 12 // Subtitle/Audio Settings -> Close
                                         6, 15, 7 -> 12 // Right from left panel -> Close
                                         10 -> 0
                                         0 -> 1
@@ -3350,8 +3367,8 @@ fun VideoPlayerScreen(
                                     100 -> 9 // Slider -> Speed Minus
                                     9, 7 -> 14 // Speed -> Sync
                                     14, 15 -> 5 // Sync -> Size
-                                    5, 6 -> -100 // Size -> Subtitle Settings
-                                    -100 -> -101 // Subtitle Settings -> Player Settings
+                                    5, 6 -> -100 // Size -> Subtitle/Audio Settings
+                                    -100 -> -101 // Subtitle/Audio Settings -> Player Settings
                                     12 -> 12 // Close stays
                                     else -> focusedButtonIndex
                                 }
@@ -3364,8 +3381,8 @@ fun VideoPlayerScreen(
                         Key.DirectionDown -> {
                             if (isControlVisible) {
                                 focusedButtonIndex = when (focusedButtonIndex) {
-                                    -101 -> -100 // Player Settings -> Subtitle Settings
-                                    -100 -> 5 // Subtitle Settings -> Size Minus
+                                    -101 -> -100 // Player Settings -> Subtitle/Audio Settings
+                                    -100 -> 5 // Subtitle/Audio Settings -> Size Minus
                                     12 -> 100 // Close -> Slider
                                     5, 6 -> 14 // Size -> Sync
                                     14, 15 -> 9 // Sync -> Speed
@@ -3634,64 +3651,22 @@ fun VideoPlayerScreen(
                 )
             }
         }
-
-        // ── 왼쪽 패널: 자막 & 재생 속도 조절 (자막설정 버튼 아래) ──────────────
+        // ── 왼쪽 통합 패널: 설정 버튼 + 자막/재생 조절 ──────────────
         androidx.compose.animation.AnimatedVisibility(
             visible = showOverlay,
             enter = androidx.compose.animation.fadeIn(tween(250)) + androidx.compose.animation.slideInHorizontally(tween(300)) { -it },
             exit = androidx.compose.animation.fadeOut(tween(250)) + androidx.compose.animation.slideOutHorizontally(tween(300)) { -it },
-            modifier = Modifier.align(androidx.compose.ui.Alignment.TopStart).padding(top = 90.dp, start = 32.dp)
+            modifier = Modifier.align(androidx.compose.ui.Alignment.TopStart).padding(top = 8.dp, start = 16.dp)
         ) {
             Column(
                 modifier = Modifier
-                    .wrapContentWidth()
-                    .background(Color.Black.copy(alpha = 0.7f), androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
                     .clickable(
                         indication = null,
                         interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-                    ) { resetHideTimer() }
-                    .padding(horizontal = 6.dp, vertical = 8.dp),
-                horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) { resetHideTimer() },
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                // ─── 자막크기: 100% [－][↺][＋] ───
-                Text("자막크기", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 5) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleScale = maxOf(0.5f, subtitleScale - 0.15f); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
-                    Text("${(subtitleScale * 100).toInt()}%", color = if (subtitleScale != 1.0f) Color(0xFF80D8FF) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.widthIn(min = 32.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                    Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 6) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleScale = minOf(3.0f, subtitleScale + 0.15f); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
-                }
-
-                Box(Modifier.width(110.dp).height(1.dp).background(Color.White.copy(alpha = 0.12f)))
-
-                // ─── 자막싱크: 0s [－][↺][＋] ───
-                Text("자막싱크", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 14) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = (subtitleOffsetMs - 500L).coerceIn(-5000L, 5000L); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
-                    Text(if (subtitleOffsetMs == 0L) "0s" else "${if (subtitleOffsetMs > 0) "+" else ""}${subtitleOffsetMs / 1000f}s", color = if (subtitleOffsetMs != 0L) Color(0xFFFFD54F) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.widthIn(min = 32.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                    Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 15) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = (subtitleOffsetMs + 500L).coerceIn(-5000L, 5000L); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
-                }
-
-                Box(Modifier.width(110.dp).height(1.dp).background(Color.White.copy(alpha = 0.12f)))
-
-                // ─── 재생속도: 1.0x [－][↺][＋] ───
-                Text("재생속도", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 9) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { currentSpeed = (kotlin.math.round((currentSpeed - 0.1f) * 10f) / 10f).coerceIn(0.1f, 3.0f); exoPlayer.setPlaybackSpeed(currentSpeed); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
-                    Text("${currentSpeed}x", color = if (currentSpeed != 1.0f) Color(0xFFA5D6A7) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.widthIn(min = 32.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                    Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 7) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { currentSpeed = (kotlin.math.round((currentSpeed + 0.1f) * 10f) / 10f).coerceIn(0.1f, 3.0f); exoPlayer.setPlaybackSpeed(currentSpeed); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
-                }
-            }
-        }
-
-        // ── 플로팅 설정 버튼 (왼쪽 상단) ──────────────────────
-        androidx.compose.animation.AnimatedVisibility(
-            visible = showOverlay,
-            enter = androidx.compose.animation.fadeIn(tween(250)),
-            exit = androidx.compose.animation.fadeOut(tween(250)),
-            modifier = Modifier.align(androidx.compose.ui.Alignment.TopStart).padding(top = 8.dp, start = 16.dp)
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                // ── 설정 버튼 그룹 ──
                 // 플레이 설정 버튼
                 Box(
                     modifier = Modifier
@@ -3716,8 +3691,8 @@ fun VideoPlayerScreen(
                     )
                 }
 
-                // 자막 설정 버튼
-                if (subtitleTrackLabels.isNotEmpty()) {
+                // 자막/음성 설정 버튼
+                if (subtitleTrackLabels.isNotEmpty() || audioTrackLabels.size > 1) {
                     Box(
                         modifier = Modifier
                             .background(Color.Black.copy(alpha = 0.55f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
@@ -3733,12 +3708,50 @@ fun VideoPlayerScreen(
                         contentAlignment = androidx.compose.ui.Alignment.Center
                     ) {
                         Text(
-                            text = "자막설정",
+                            text = "자막/음성",
                             color = if (isSubtitleDisabled) Color.White.copy(alpha = 0.4f) else Color.White,
                             style = MaterialTheme.typography.titleSmall,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold
                         )
+                    }
+                }
+
+                // ── 자막 & 재생속도 조절 컨트롤 ──
+                Column(
+                    modifier = Modifier
+                        .wrapContentWidth()
+                        .background(Color.Black.copy(alpha = 0.7f), androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                        .padding(horizontal = 6.dp, vertical = 8.dp),
+                    horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    // ─── 자막크기: 100% [－][＋] ───
+                    Text("자막크기", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
+                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 5) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleScale = maxOf(0.5f, subtitleScale - 0.15f); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                        Text("${(subtitleScale * 100).toInt()}%", color = if (subtitleScale != 1.0f) Color(0xFF80D8FF) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.widthIn(min = 32.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 6) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleScale = minOf(3.0f, subtitleScale + 0.15f); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                    }
+
+                    Box(Modifier.width(110.dp).height(1.dp).background(Color.White.copy(alpha = 0.12f)))
+
+                    // ─── 자막싱크: 0s [－][＋] ───
+                    Text("자막싱크", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
+                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 14) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = (subtitleOffsetMs - 500L).coerceIn(-5000L, 5000L); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                        Text(if (subtitleOffsetMs == 0L) "0s" else "${if (subtitleOffsetMs > 0) "+" else ""}${subtitleOffsetMs / 1000f}s", color = if (subtitleOffsetMs != 0L) Color(0xFFFFD54F) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.widthIn(min = 32.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 15) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = (subtitleOffsetMs + 500L).coerceIn(-5000L, 5000L); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                    }
+
+                    Box(Modifier.width(110.dp).height(1.dp).background(Color.White.copy(alpha = 0.12f)))
+
+                    // ─── 재생속도: 1.0x [－][＋] ───
+                    Text("재생속도", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
+                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 9) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { currentSpeed = (kotlin.math.round((currentSpeed - 0.1f) * 10f) / 10f).coerceIn(0.1f, 3.0f); exoPlayer.setPlaybackSpeed(currentSpeed); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                        Text("${currentSpeed}x", color = if (currentSpeed != 1.0f) Color(0xFFA5D6A7) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.widthIn(min = 32.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 7) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { currentSpeed = (kotlin.math.round((currentSpeed + 0.1f) * 10f) / 10f).coerceIn(0.1f, 3.0f); exoPlayer.setPlaybackSpeed(currentSpeed); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
                     }
                 }
             }
@@ -4031,15 +4044,78 @@ fun VideoPlayerScreen(
         )
     }
 
-    // ── 자막 선택 다이얼로그 ──────────────────────────────────────
+    // ── 자막/음성 통합 설정 다이얼로그 ──────────────────────────────────────
     if (showSubtitleDialog) {
+        var selectedTab by remember { mutableIntStateOf(0) } // 0: 자막, 1: 음성
+        val hasAudioTracks = audioTrackLabels.size > 1
+
         AlertDialog(
             onDismissRequest = { showSubtitleDialog = false },
             title = {
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    Text("자막설정", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.weight(1f))
-                    Text("${subtitleTrackLabels.size}개", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                if (hasAudioTracks) {
+                    // 탭 UI
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(0.dp)
+                    ) {
+                        // 자막 탭
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .background(
+                                    if (selectedTab == 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                    else Color.Transparent,
+                                    androidx.compose.foundation.shape.RoundedCornerShape(topStart = 8.dp, bottomStart = 8.dp)
+                                )
+                                .border(
+                                    1.dp,
+                                    if (selectedTab == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                                    androidx.compose.foundation.shape.RoundedCornerShape(topStart = 8.dp, bottomStart = 8.dp)
+                                )
+                                .clickable { selectedTab = 0 }
+                                .padding(vertical = 10.dp),
+                            contentAlignment = androidx.compose.ui.Alignment.Center
+                        ) {
+                            Text(
+                                "자막 (${subtitleTrackLabels.size})",
+                                fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Normal,
+                                color = if (selectedTab == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                fontSize = 15.sp
+                            )
+                        }
+                        // 음성 탭
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .background(
+                                    if (selectedTab == 1) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                    else Color.Transparent,
+                                    androidx.compose.foundation.shape.RoundedCornerShape(topEnd = 8.dp, bottomEnd = 8.dp)
+                                )
+                                .border(
+                                    1.dp,
+                                    if (selectedTab == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                                    androidx.compose.foundation.shape.RoundedCornerShape(topEnd = 8.dp, bottomEnd = 8.dp)
+                                )
+                                .clickable { selectedTab = 1 }
+                                .padding(vertical = 10.dp),
+                            contentAlignment = androidx.compose.ui.Alignment.Center
+                        ) {
+                            Text(
+                                "음성 (${audioTrackLabels.size})",
+                                fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal,
+                                color = if (selectedTab == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                fontSize = 15.sp
+                            )
+                        }
+                    }
+                } else {
+                    // 음성 트랙이 1개 이하면 탭 없이 기존 자막 전용 헤더
+                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        Text("자막설정", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.weight(1f))
+                        Text("${subtitleTrackLabels.size}개", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                    }
                 }
             },
             text = {
@@ -4048,52 +4124,15 @@ fun VideoPlayerScreen(
                         .heightIn(max = 400.dp)
                         .verticalScroll(rememberScrollState())
                 ) {
-                    // 끄기 옵션
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 3.dp)
-                            .background(
-                                if (isSubtitleDisabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
-                            )
-                            .clickable {
-                                userManuallySelectedSubtitle = true
-                                trackSelector.setParameters(
-                                    trackSelector.buildUponParameters()
-                                        .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true)
-                                )
-                                isSubtitleDisabled = true
-                                showSubtitleDialog = false
-                            }
-                            .padding(horizontal = 12.dp, vertical = 10.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("끄기", fontWeight = if (isSubtitleDisabled) FontWeight.Bold else FontWeight.Normal)
-                            if (isSubtitleDisabled) {
-                                Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-
-                    Spacer(Modifier.height(4.dp))
-                    Divider(color = MaterialTheme.colorScheme.outlineVariant)
-                    Spacer(Modifier.height(4.dp))
-
-                    // 자막 트랙 목록
-                    subtitleTrackLabels.forEachIndexed { index, (label, isSelected, mediaTrackGroup) ->
-                        val isActive = !isSubtitleDisabled && isSelected
+                    if (selectedTab == 0 || !hasAudioTracks) {
+                        // ── 자막 탭 ──
+                        // 끄기 옵션
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 3.dp)
                                 .background(
-                                    if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                    if (isSubtitleDisabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
                                     else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
                                     androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
                                 )
@@ -4101,15 +4140,10 @@ fun VideoPlayerScreen(
                                     userManuallySelectedSubtitle = true
                                     trackSelector.setParameters(
                                         trackSelector.buildUponParameters()
-                                            .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, false)
-                                            .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_TEXT)
-                                            .setOverrideForType(
-                                                androidx.media3.common.TrackSelectionOverride(mediaTrackGroup, 0)
-                                            )
+                                            .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true)
                                     )
-                                    isSubtitleDisabled = false
+                                    isSubtitleDisabled = true
                                     showSubtitleDialog = false
-                                    android.util.Log.d("VideoPlayerScreen", "User manually selected subtitle track: $label")
                                 }
                                 .padding(horizontal = 12.dp, vertical = 10.dp)
                         ) {
@@ -4118,9 +4152,91 @@ fun VideoPlayerScreen(
                                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Text(label, fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.weight(1f))
-                                if (isActive) {
-                                    Text(" ✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                Text("끄기", fontWeight = if (isSubtitleDisabled) FontWeight.Bold else FontWeight.Normal)
+                                if (isSubtitleDisabled) {
+                                    Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(4.dp))
+                        Divider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(Modifier.height(4.dp))
+
+                        // 자막 트랙 목록
+                        subtitleTrackLabels.forEachIndexed { index, (label, isSelected, mediaTrackGroup) ->
+                            val isActive = !isSubtitleDisabled && isSelected
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp)
+                                    .background(
+                                        if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable {
+                                        userManuallySelectedSubtitle = true
+                                        trackSelector.setParameters(
+                                            trackSelector.buildUponParameters()
+                                                .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, false)
+                                                .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_TEXT)
+                                                .setOverrideForType(
+                                                    androidx.media3.common.TrackSelectionOverride(mediaTrackGroup, 0)
+                                                )
+                                        )
+                                        isSubtitleDisabled = false
+                                        showSubtitleDialog = false
+                                        android.util.Log.d("VideoPlayerScreen", "User manually selected subtitle track: $label")
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(label, fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.weight(1f))
+                                    if (isActive) {
+                                        Text(" ✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // ── 음성 탭 ──
+                        audioTrackLabels.forEachIndexed { index, (label, isSelected, mediaTrackGroup) ->
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp)
+                                    .background(
+                                        if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable {
+                                        trackSelector.setParameters(
+                                            trackSelector.buildUponParameters()
+                                                .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_AUDIO)
+                                                .setOverrideForType(
+                                                    androidx.media3.common.TrackSelectionOverride(mediaTrackGroup, 0)
+                                                )
+                                        )
+                                        showSubtitleDialog = false
+                                        android.util.Log.d("VideoPlayerScreen", "User selected audio track: $label")
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(label, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.weight(1f))
+                                    if (isSelected) {
+                                        Text(" ✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                    }
                                 }
                             }
                         }
@@ -4569,6 +4685,63 @@ fun buildSubtitleLabel(language: String?, id: String?, mimeType: String?, trackL
     return buildString {
         append(langName ?: trackLabel ?: "자막")
         if (extraInfo != null) append(" ($extraInfo)")
+    }
+}
+
+
+fun buildAudioTrackLabel(format: androidx.media3.common.Format): String {
+    val lang = format.language?.lowercase()
+    val langName = when (lang) {
+        "ko", "kor" -> "한국어"
+        "en", "eng" -> "영어"
+        "ja", "jpn" -> "일본어"
+        "zh", "zho", "chi", "cmn", "yue" -> "중국어"
+        "fr", "fre", "fra" -> "프랑스어"
+        "de", "ger", "deu" -> "독일어"
+        "es", "spa" -> "스페인어"
+        "pt", "por" -> "포르투갈어"
+        "ru", "rus" -> "러시아어"
+        "ar", "ara" -> "아랍어"
+        "th", "tha" -> "태국어"
+        "vi", "vie" -> "베트남어"
+        "id", "ind" -> "인도네시아어"
+        "it", "ita" -> "이탈리아어"
+        "hi", "hin" -> "힌디어"
+        null, "und", "" -> null
+        else -> lang
+    }
+
+    val codecName = format.sampleMimeType?.let { mime ->
+        when {
+            mime.contains("ac4", ignoreCase = true) -> "AC4"
+            mime.contains("eac3", ignoreCase = true) || mime.contains("e-ac3", ignoreCase = true) -> "EAC3"
+            mime.contains("ac3", ignoreCase = true) -> "AC3"
+            mime.contains("truehd", ignoreCase = true) -> "TrueHD"
+            mime.contains("dts", ignoreCase = true) -> "DTS"
+            mime.contains("flac", ignoreCase = true) -> "FLAC"
+            mime.contains("opus", ignoreCase = true) -> "Opus"
+            mime.contains("vorbis", ignoreCase = true) -> "Vorbis"
+            mime.contains("mp4a", ignoreCase = true) || mime.contains("aac", ignoreCase = true) -> "AAC"
+            mime.contains("mp3", ignoreCase = true) || mime == "audio/mpeg" -> "MP3"
+            mime.contains("pcm", ignoreCase = true) || mime.contains("raw", ignoreCase = true) -> "PCM"
+            else -> mime.substringAfterLast("/").uppercase()
+        }
+    }
+
+    val channelInfo = when (format.channelCount) {
+        1 -> "모노"
+        2 -> "스테레오"
+        6 -> "5.1ch"
+        8 -> "7.1ch"
+        else -> if (format.channelCount > 0) "${format.channelCount}ch" else null
+    }
+
+    val trackLabel = format.label
+
+    return buildString {
+        append(langName ?: trackLabel ?: "오디오")
+        val details = listOfNotNull(codecName, channelInfo).joinToString(", ")
+        if (details.isNotEmpty()) append(" ($details)")
     }
 }
 
