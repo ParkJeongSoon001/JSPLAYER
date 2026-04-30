@@ -26,6 +26,10 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Sort
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -107,6 +111,7 @@ sealed class ScreenState {
         val containerName: String
     ) : ScreenState()
     object LocalBrowsing : ScreenState()
+    object Favorites : ScreenState()
     // ── SMB / WebDAV ──────────────────────────────────────────────
     data class SmbServerList(val dummy: Unit = Unit) : ScreenState()
     data class WebDavServerList(val dummy: Unit = Unit) : ScreenState()
@@ -397,6 +402,7 @@ class MainActivity : ComponentActivity() {
                 var backPressedTime by remember { mutableStateOf(0L) }
                 var browsingDeviceOverride: Device<*, *, *>? by remember { mutableStateOf(null) }
                 var localBrowsingActiveMode: Boolean by remember { mutableStateOf(false) }
+                var favoritesActiveMode: Boolean by remember { mutableStateOf(false) }
                 var localSortOrder by remember { mutableStateOf(SettingsStore.getSortOrder(this@MainActivity)) }
                 var networkSortOrder by remember { mutableStateOf(SettingsStore.getSortOrder(this@MainActivity)) }
                 var localViewMode by remember { mutableStateOf(SettingsStore.getLocalViewMode(this@MainActivity)) }
@@ -622,6 +628,9 @@ class MainActivity : ComponentActivity() {
                         is ScreenState.LicensePolicy -> {
                             screenState = ScreenState.Home
                         }
+                        is ScreenState.Favorites -> {
+                            screenState = ScreenState.Home
+                        }
                         is ScreenState.ServerList -> {
                             screenState = ScreenState.Home
                         }
@@ -642,6 +651,24 @@ class MainActivity : ComponentActivity() {
                                     val prev = networkNavStack.last()
                                     screenState = ScreenState.NetworkBrowsing(cur.credentials, prev.first, prev.second)
                                 } else {
+                                    if (favoritesActiveMode) {
+                                        favoritesActiveMode = false
+                                        screenState = ScreenState.Favorites
+                                    } else {
+                                        screenState = when (cur.credentials.type) {
+                                            "SMB" -> ScreenState.SmbServerList()
+                                            "FTP", "SFTP", "FTPS" -> ScreenState.FtpSftpServerList()
+                                            "GOOGLE_DRIVE" -> ScreenState.Home
+                                            "ONEDRIVE" -> ScreenState.Home
+                                            else -> ScreenState.WebDavServerList()
+                                        }
+                                    }
+                                }
+                            } else {
+                                if (favoritesActiveMode) {
+                                    favoritesActiveMode = false
+                                    screenState = ScreenState.Favorites
+                                } else {
                                     screenState = when (cur.credentials.type) {
                                         "SMB" -> ScreenState.SmbServerList()
                                         "FTP", "SFTP", "FTPS" -> ScreenState.FtpSftpServerList()
@@ -649,14 +676,6 @@ class MainActivity : ComponentActivity() {
                                         "ONEDRIVE" -> ScreenState.Home
                                         else -> ScreenState.WebDavServerList()
                                     }
-                                }
-                            } else {
-                                screenState = when (cur.credentials.type) {
-                                    "SMB" -> ScreenState.SmbServerList()
-                                    "FTP", "SFTP", "FTPS" -> ScreenState.FtpSftpServerList()
-                                    "GOOGLE_DRIVE" -> ScreenState.Home
-                                    "ONEDRIVE" -> ScreenState.Home
-                                    else -> ScreenState.WebDavServerList()
                                 }
                             }
                         }
@@ -679,6 +698,9 @@ class MainActivity : ComponentActivity() {
                             screenState = ScreenState.Home
                         }
                         is ScreenState.LicensePolicy -> {
+                            screenState = ScreenState.Home
+                        }
+                        is ScreenState.Favorites -> {
                             screenState = ScreenState.Home
                         }
                         is ScreenState.ServerList -> {
@@ -711,21 +733,26 @@ class MainActivity : ComponentActivity() {
                             isVideoControlVisible = true
                             val cur = screenState
                             if (cur is ScreenState.Playing) {
-                                // networkBrowsingCredentials가 있으면 NetworkBrowsing으로 복귀
-                                val creds = networkBrowsingCredentials
-                                if (creds != null && networkNavStack.isNotEmpty()) {
-                                    val prev = networkNavStack.last()
-                                    screenState = ScreenState.NetworkBrowsing(creds, prev.first, prev.second)
-                                } else if (browsingDeviceOverride != null && navStack.isNotEmpty()) {
-                                    val prev = navStack.last()
-                                    screenState = ScreenState.Browsing(browsingDeviceOverride!!, prev.containerId, prev.containerName)
-                                } else if (localBrowsingActiveMode) {
-                                    screenState = ScreenState.LocalBrowsing
-                                } else if (externalVideoMode) {
-                                    externalVideoMode = false
-                                    screenState = ScreenState.Home
+                                if (favoritesActiveMode) {
+                                    favoritesActiveMode = false
+                                    screenState = ScreenState.Favorites
                                 } else {
-                                    screenState = ScreenState.ServerList
+                                    // networkBrowsingCredentials가 있으면 NetworkBrowsing으로 복귀
+                                    val creds = networkBrowsingCredentials
+                                    if (creds != null && networkNavStack.isNotEmpty()) {
+                                        val prev = networkNavStack.last()
+                                        screenState = ScreenState.NetworkBrowsing(creds, prev.first, prev.second)
+                                    } else if (browsingDeviceOverride != null && navStack.isNotEmpty()) {
+                                        val prev = navStack.last()
+                                        screenState = ScreenState.Browsing(browsingDeviceOverride!!, prev.containerId, prev.containerName)
+                                    } else if (localBrowsingActiveMode) {
+                                        screenState = ScreenState.LocalBrowsing
+                                    } else if (externalVideoMode) {
+                                        externalVideoMode = false
+                                        screenState = ScreenState.Home
+                                    } else {
+                                        screenState = ScreenState.ServerList
+                                    }
                                 }
                             }
                         }
@@ -735,6 +762,10 @@ class MainActivity : ComponentActivity() {
                         is ScreenState.LocalBrowsing -> {
                             if (localSelectedFolder != null) {
                                 localSelectedFolder = null
+                            } else if (favoritesActiveMode) {
+                                favoritesActiveMode = false
+                                localBrowsingActiveMode = false
+                                screenState = ScreenState.Favorites
                             } else {
                                 screenState = ScreenState.Home
                             }
@@ -940,9 +971,142 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onSettingsClick = { screenState = ScreenState.Settings },
                                 onLicenseClick = { screenState = ScreenState.LicensePolicy },
+                                onFavoritesClick = { screenState = ScreenState.Favorites },
                                 isTvMode = isTvMode,
                                 onZipClick = { codecZipPickerLauncher.launch("application/zip") },
                                 codecInstallResultMessage = codecInstallResultMessage.value
+                            )
+                        }
+                        is ScreenState.Favorites -> {
+                            FavoritesScreen(
+                                isTvMode = isTvMode,
+                                onBackClick = { triggerBack() },
+                                onPlayVideo = { item ->
+                                    // 즐겨찾기에서 재생 시 네트워크 credentials 복원
+                                    if (item.credentialsJson != null) {
+                                        try {
+                                            val creds = ServerCredentials.fromJson(org.json.JSONObject(item.credentialsJson))
+                                            networkBrowsingCredentials = creds
+                                        } catch (_: Exception) {}
+                                    }
+                                    // httpHeaders 복원
+                                    val headers = if (item.httpHeaders != null) {
+                                        try {
+                                            val jo = org.json.JSONObject(item.httpHeaders)
+                                            jo.keys().asSequence().associateWith { jo.getString(it) }
+                                        } catch (_: Exception) { emptyMap() }
+                                    } else emptyMap()
+                                    
+                                    // 즐겨찾기에서 재생 시 복귀 플래그 설정
+                                    localBrowsingActiveMode = false
+                                    browsingDeviceOverride = null
+                                    networkNavStack.clear()
+                                    favoritesActiveMode = true
+                                    
+                                    // OneDrive/Google Drive: 임시 URL 만료 → 파일 ID로 새 URL 발급
+                                    when (item.sourceType) {
+                                        "ONEDRIVE" -> {
+                                            kotlinx.coroutines.MainScope().launch {
+                                                try {
+                                                    val fileId = item.sourcePath
+                                                    val freshUrl = OneDriveManager.getDirectDownloadUrl(fileId)
+                                                    if (freshUrl != null) {
+                                                        // subtitleUrl에 저장된 파일 ID를 다운로드 URL로 변환
+                                                        val odSubUrl = if (!item.subtitleUrl.isNullOrEmpty() && !item.subtitleUrl.startsWith("http")) {
+                                                            OneDriveManager.getDirectDownloadUrl(item.subtitleUrl)
+                                                        } else item.subtitleUrl
+                                                        screenState = ScreenState.Playing(
+                                                            videoUrl = freshUrl,
+                                                            title = item.title,
+                                                            subtitleUrl = odSubUrl,
+                                                            subtitleExtension = item.subtitleExtension,
+                                                            ftpEncoding = item.ftpEncoding,
+                                                            httpHeaders = headers
+                                                        )
+                                                    } else {
+                                                        android.widget.Toast.makeText(this@MainActivity, "OneDrive URL 발급 실패. 다시 로그인해주세요.", android.widget.Toast.LENGTH_SHORT).show()
+                                                        screenState = ScreenState.Favorites
+                                                    }
+                                                } catch (e: Exception) {
+                                                    android.widget.Toast.makeText(this@MainActivity, "OneDrive 접속 실패: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                                                    screenState = ScreenState.Favorites
+                                                }
+                                            }
+                                        }
+                                        "GOOGLE_DRIVE" -> {
+                                            // Google Drive: 실시간으로 accessToken 발급하여 Authorization 헤더 설정
+                                            kotlinx.coroutines.MainScope().launch {
+                                                try {
+                                                    val account = GoogleDriveAuthManager.getSignedInAccount(this@MainActivity)
+                                                    val token = if (account != null) {
+                                                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                                            GoogleDriveManager.getAccessToken(this@MainActivity, account)
+                                                        }
+                                                    } else null
+                                                    
+                                                    if (token != null) {
+                                                        val streamUrl = GoogleDriveManager.getStreamUrl(item.sourcePath)
+                                                        val authHeaders = mapOf("Authorization" to "Bearer $token")
+                                                        // subtitleUrl에 저장된 파일 ID를 Google Drive API URL로 변환
+                                                        val gdSubUrl = if (!item.subtitleUrl.isNullOrEmpty() && !item.subtitleUrl.startsWith("http")) {
+                                                            GoogleDriveManager.getStreamUrl(item.subtitleUrl)
+                                                        } else item.subtitleUrl
+                                                        screenState = ScreenState.Playing(
+                                                            videoUrl = streamUrl,
+                                                            title = item.title,
+                                                            subtitleUrl = gdSubUrl,
+                                                            subtitleExtension = item.subtitleExtension,
+                                                            ftpEncoding = item.ftpEncoding,
+                                                            httpHeaders = authHeaders
+                                                        )
+                                                    } else {
+                                                        android.widget.Toast.makeText(this@MainActivity, "Google Drive 인증 실패. 다시 로그인해주세요.", android.widget.Toast.LENGTH_SHORT).show()
+                                                        screenState = ScreenState.Favorites
+                                                    }
+                                                } catch (e: Exception) {
+                                                    android.widget.Toast.makeText(this@MainActivity, "Google Drive 접속 실패: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                                                    screenState = ScreenState.Favorites
+                                                }
+                                            }
+                                        }
+                                        else -> {
+                                            screenState = ScreenState.Playing(
+                                                videoUrl = item.videoUrl,
+                                                title = item.title,
+                                                subtitleUrl = item.subtitleUrl,
+                                                subtitleExtension = item.subtitleExtension,
+                                                ftpEncoding = item.ftpEncoding,
+                                                httpHeaders = headers
+                                            )
+                                        }
+                                    }
+                                },
+                                onNavigateToFolder = { item ->
+                                    when (item.sourceType) {
+                                        "LOCAL" -> {
+                                            localBrowsingActiveMode = true
+                                            favoritesActiveMode = true
+                                            screenState = ScreenState.LocalBrowsing
+                                        }
+                                        "SMB", "WEBDAV", "FTP", "FTPS", "SFTP", "GOOGLE_DRIVE", "ONEDRIVE" -> {
+                                            if (item.credentialsJson != null) {
+                                                try {
+                                                    val creds = ServerCredentials.fromJson(org.json.JSONObject(item.credentialsJson))
+                                                    networkBrowsingCredentials = creds
+                                                    networkNavStack.clear()
+                                                    networkNavStack.add(Pair(item.sourcePath, item.title))
+                                                    favoritesActiveMode = true
+                                                    screenState = ScreenState.NetworkBrowsing(creds, item.sourcePath, item.title)
+                                                } catch (e: Exception) {
+                                                    android.widget.Toast.makeText(this@MainActivity, "접속 정보를 복원할 수 없습니다.", android.widget.Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        }
+                                        "DLNA" -> {
+                                            android.widget.Toast.makeText(this@MainActivity, "DLNA 폴더는 기기 검색이 필요합니다.\n홈 → DLNA에서 접속해주세요.", android.widget.Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                }
                             )
                         }
                         is ScreenState.Settings -> {
@@ -1569,20 +1733,25 @@ class MainActivity : ComponentActivity() {
                                     httpHeaders = state.httpHeaders,
                                     onClose = {
                                         isVideoControlVisible = true // 다음 재생 시 초기화
-                                        val creds = networkBrowsingCredentials
-                                        if (creds != null && networkNavStack.isNotEmpty()) {
-                                            val prev = networkNavStack.last()
-                                            screenState = ScreenState.NetworkBrowsing(creds, prev.first, prev.second)
-                                        } else if (browsingDeviceOverride != null && navStack.isNotEmpty()) {
-                                            val prev = navStack.last()
-                                            screenState = ScreenState.Browsing(browsingDeviceOverride!!, prev.containerId, prev.containerName)
-                                        } else if (localBrowsingActiveMode) {
-                                            screenState = ScreenState.LocalBrowsing
-                                        } else if (externalVideoMode) {
-                                            externalVideoMode = false
-                                            screenState = ScreenState.Home
+                                        if (favoritesActiveMode) {
+                                            favoritesActiveMode = false
+                                            screenState = ScreenState.Favorites
                                         } else {
-                                            screenState = ScreenState.ServerList
+                                            val creds = networkBrowsingCredentials
+                                            if (creds != null && networkNavStack.isNotEmpty()) {
+                                                val prev = networkNavStack.last()
+                                                screenState = ScreenState.NetworkBrowsing(creds, prev.first, prev.second)
+                                            } else if (browsingDeviceOverride != null && navStack.isNotEmpty()) {
+                                                val prev = navStack.last()
+                                                screenState = ScreenState.Browsing(browsingDeviceOverride!!, prev.containerId, prev.containerName)
+                                            } else if (localBrowsingActiveMode) {
+                                                screenState = ScreenState.LocalBrowsing
+                                            } else if (externalVideoMode) {
+                                                externalVideoMode = false
+                                                screenState = ScreenState.Home
+                                            } else {
+                                                screenState = ScreenState.ServerList
+                                            }
                                         }
                                     },
                                     playlist = state.playlist,
@@ -1916,6 +2085,14 @@ fun ServerListScreen(
             },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
         )
+
+        // DLNA 폴더 즐겨찾기 미지원 안내
+        Text(
+            text = "DLNA는 폴더 즐겨찾기 기능을 지원하지 않습니다.",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.Gray.copy(alpha = 0.6f),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+        )
         
         val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
@@ -2228,8 +2405,18 @@ fun BrowseScreen(
                     val iconTint = if (isFolder) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
                     
                     var isFocused by remember { mutableStateOf(false) }
+                    var isStarFocused by remember { mutableStateOf(false) }
                     val itemFocusRequester = remember { FocusRequester() }
                     val PrimaryColor = MaterialTheme.colorScheme.primary
+                    val dlnaFavCtx = androidx.compose.ui.platform.LocalContext.current
+                    
+                    val dlnaVideoUrl = if (!isFolder && item is Item) {
+                        (item.resources.find { it.protocolInfo.contentFormat.startsWith("video/") || it.protocolInfo.contentFormat.startsWith("audio/") } ?: item.firstResource)?.value ?: ""
+                    } else ""
+                    val dlnaSourcePath = dlnaVideoUrl
+                    var isDlnaFav by remember(dlnaVideoUrl, dlnaSourcePath) {
+                        mutableStateOf(FavoriteStore.isFavoriteByKey(dlnaFavCtx, dlnaVideoUrl, dlnaSourcePath))
+                    }
 
                     if (!isLoading && index == initialSelectedIndex) {
                         LaunchedEffect(Unit) {
@@ -2241,15 +2428,45 @@ fun BrowseScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .focusRequester(itemFocusRequester)
-                            .onFocusChanged { isFocused = it.isFocused }
-                            .focusable()
-                            .onKeyEvent { event ->
-                                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
-                                    onItemClick(item, index)
-                                    true
-                                } else false
+                            .onFocusChanged { 
+                                isFocused = it.hasFocus 
+                                if (!it.hasFocus) isStarFocused = false 
                             }
-                            .clickable { onItemClick(item, index) }
+                            .then(
+                                if (isTvMode) {
+                                    Modifier
+                                        .onKeyEvent { event ->
+                                            if (event.key == Key.DirectionCenter || event.key == Key.Enter) {
+                                                if (event.type == KeyEventType.KeyDown) {
+                                                    if (isStarFocused) {
+                                                        val favItem = FavoriteItem(
+                                                            id = java.util.UUID.randomUUID().toString(),
+                                                            title = item.title ?: "Unknown",
+                                                            videoUrl = dlnaVideoUrl,
+                                                            isDirectory = isFolder,
+                                                            sourceType = "DLNA",
+                                                            sourcePath = dlnaSourcePath,
+                                                            addedAt = System.currentTimeMillis()
+                                                        )
+                                                        isDlnaFav = FavoriteStore.toggle(dlnaFavCtx, favItem)
+                                                    } else {
+                                                        onItemClick(item, index)
+                                                    }
+                                                }
+                                                true
+                                            } else if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionRight && !isFolder) {
+                                                isStarFocused = true
+                                                true
+                                            } else if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionLeft && isStarFocused) {
+                                                isStarFocused = false
+                                                true
+                                            } else false
+                                        }
+                                        .focusable()
+                                } else {
+                                    Modifier.clickable { onItemClick(item, index) }
+                                }
+                            )
                             .border(
                                 width = if (isTvMode && isFocused) 3.dp else 0.dp,
                                 color = if (isTvMode && isFocused) PrimaryColor else Color.Transparent,
@@ -2349,6 +2566,41 @@ fun BrowseScreen(
                                     }
                                 }
                             }
+                            if (!isFolder) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .background(
+                                        if (isFocused && isStarFocused) Color(0xFFFFD700).copy(alpha = 0.3f) else Color.Transparent,
+                                        androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                                    )
+                                    .border(
+                                        width = if (isFocused && isStarFocused) 2.dp else 0.dp,
+                                        color = if (isFocused && isStarFocused) Color.White else Color.Transparent,
+                                        shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable {
+                                        val favItem = FavoriteItem(
+                                            id = java.util.UUID.randomUUID().toString(),
+                                            title = item.title ?: "Unknown",
+                                            videoUrl = dlnaVideoUrl,
+                                            isDirectory = isFolder,
+                                            sourceType = "DLNA",
+                                            sourcePath = dlnaSourcePath,
+                                            addedAt = System.currentTimeMillis()
+                                        )
+                                        isDlnaFav = FavoriteStore.toggle(dlnaFavCtx, favItem)
+                                    },
+                                contentAlignment = androidx.compose.ui.Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (isDlnaFav) Icons.Filled.Star else Icons.Default.StarBorder,
+                                    contentDescription = "즐겨찾기",
+                                    tint = if (isDlnaFav) Color(0xFFFFD700) else Color.Gray.copy(alpha = 0.5f),
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                            } // end if (!isFolder)
                         }
                     }
                 }
@@ -2547,6 +2799,7 @@ fun VideoPlayerScreen(
     var screenDragPosition by remember { mutableLongStateOf(-1L) }
     var seekIndicatorText by remember { mutableStateOf("") }
     var showSeekIndicator by remember { mutableStateOf(false) }
+    var isLongPressing by remember { mutableStateOf(false) }
 
     LaunchedEffect(showSeekIndicator, isDraggingScreen) {
         if (showSeekIndicator && !isDraggingScreen) {
@@ -3173,6 +3426,18 @@ fun VideoPlayerScreen(
             .focusable()
             .pointerInput(Unit) {
                 detectTapGestures(
+                    onPress = { offset ->
+                        val released = tryAwaitRelease()
+                        if (isLongPressing) {
+                            isLongPressing = false
+                            exoPlayer.setPlaybackSpeed(currentSpeed)
+                        }
+                    },
+                    onLongPress = { offset ->
+                        if (currentIsControlVisible) return@detectTapGestures
+                        isLongPressing = true
+                        exoPlayer.setPlaybackSpeed(2.0f)
+                    },
                     onTap = {
                         onControlVisibilityChange(!currentIsControlVisible)
                         if (!currentIsControlVisible) hideTimerKey++
@@ -3603,6 +3868,28 @@ fun VideoPlayerScreen(
                     text = seekIndicatorText,
                     color = Color.White,
                     style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        // --- Long Press 2X Indicator ---
+        androidx.compose.animation.AnimatedVisibility(
+            visible = isLongPressing,
+            enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(150)),
+            exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(300)),
+            modifier = Modifier.align(androidx.compose.ui.Alignment.TopCenter).padding(top = 48.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.6f), androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                    .padding(horizontal = 24.dp, vertical = 12.dp),
+                contentAlignment = androidx.compose.ui.Alignment.Center
+            ) {
+                Text(
+                    text = "2X ▶ ${formatSrtTime(currentPosition).substringBefore(",")}",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -5289,6 +5576,32 @@ fun LocalBrowserScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
+                                // ★ 즐겨찾기 토글 아이콘
+                                var isFolderFav by remember(fullPath) {
+                                    mutableStateOf(FavoriteStore.isFavoritePath(context, fullPath))
+                                }
+                                IconButton(
+                                    onClick = {
+                                        val favItem = FavoriteItem(
+                                            id = java.util.UUID.randomUUID().toString(),
+                                            title = name,
+                                            videoUrl = "",
+                                            isDirectory = true,
+                                            sourceType = "LOCAL",
+                                            sourcePath = fullPath,
+                                            addedAt = System.currentTimeMillis()
+                                        )
+                                        isFolderFav = FavoriteStore.toggle(context, favItem)
+                                    },
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isFolderFav) Icons.Filled.Star else Icons.Default.StarBorder,
+                                        contentDescription = "즐겨찾기",
+                                        tint = if (isFolderFav) Color(0xFFFFD700) else Color.Gray.copy(alpha = 0.5f),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                                 Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
@@ -5402,6 +5715,33 @@ fun LocalBrowserScreen(
                                         }
                                     }
                                 }
+                                // ★ 즐겨찾기 토글 아이콘
+                                val favVideoUrl = video.uri.toString()
+                                var isFav by remember(favVideoUrl) {
+                                    mutableStateOf(FavoriteStore.isFavorite(context, favVideoUrl))
+                                }
+                                IconButton(
+                                    onClick = {
+                                        val favItem = FavoriteItem(
+                                            id = java.util.UUID.randomUUID().toString(),
+                                            title = video.title,
+                                            videoUrl = favVideoUrl,
+                                            isDirectory = false,
+                                            sourceType = "LOCAL",
+                                            sourcePath = video.path ?: "",
+                                            addedAt = System.currentTimeMillis()
+                                        )
+                                        isFav = FavoriteStore.toggle(context, favItem)
+                                    },
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isFav) Icons.Filled.Star else Icons.Default.StarBorder,
+                                        contentDescription = "즐겨찾기",
+                                        tint = if (isFav) Color(0xFFFFD700) else Color.Gray.copy(alpha = 0.5f),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -5423,6 +5763,7 @@ fun HomeScreen(
     onOneDriveClick: () -> Unit = {},
     onSettingsClick: () -> Unit = {},
     onLicenseClick: () -> Unit = {},
+    onFavoritesClick: () -> Unit = {},
     isTvMode: Boolean = false,
     onZipClick: () -> Unit = {},
     codecInstallResultMessage: String? = null
@@ -5563,6 +5904,79 @@ fun HomeScreen(
                         lineHeight = 12.sp
                     )
                 }
+
+                // ★ 즐겨찾기 Card
+                val favCount = remember { FavoriteStore.count(context) }
+                val cardFavBorderStart = Color(0xFFFFD700)
+                val cardFavBorderEnd   = Color(0xFFFFA500)
+                val cardFavBg          = Color(0xFF4A3B10)
+                var isFavFocused by remember { mutableStateOf(false) }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(90.dp)
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                        .background(
+                            Brush.linearGradient(
+                                listOf(cardFavBg, Color(0xFF2E2508)),
+                                start = androidx.compose.ui.geometry.Offset(0f, 0f),
+                                end   = androidx.compose.ui.geometry.Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
+                            )
+                        )
+                        .border(
+                            width = if (isTvMode && isFavFocused) 2.5.dp else 1.dp,
+                            brush = Brush.linearGradient(listOf(
+                                if (isTvMode && isFavFocused) Color.White else cardFavBorderStart,
+                                cardFavBorderEnd
+                            )),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+                        )
+                        .onFocusChanged { isFavFocused = it.isFocused }
+                        .focusable()
+                        .onKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) { onFavoritesClick(); true } else false
+                        }
+                        .clickable { onFavoritesClick() }
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .background(Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp)),
+                                contentAlignment = androidx.compose.ui.Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Star, null, tint = Color(0xFFFFD700), modifier = Modifier.size(20.dp))
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Text("즐겨찾기", style = MaterialTheme.typography.titleMedium, color = Color.White, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            if (favCount > 0) {
+                                Spacer(Modifier.width(8.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .background(Color(0xFFFFD700).copy(alpha = 0.25f), androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = "${favCount}개",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFFFFD700),
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.weight(1f))
+                            Text(">", color = Color.White.copy(alpha = 0.5f), style = MaterialTheme.typography.titleMedium)
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text("자주 보는 영상과 폴더를 빠르게 재생하세요.", style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.7f))
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
 
                 // 로컬 디렉토리 Card
                 Box(
@@ -6427,6 +6841,358 @@ fun PassthroughSettingsScreen(
                             uncheckedTrackColor = Color(0xFF334155)
                         )
                     )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FavoritesScreen(
+    isTvMode: Boolean = false,
+    onBackClick: () -> Unit,
+    onPlayVideo: (FavoriteItem) -> Unit,
+    onNavigateToFolder: (FavoriteItem) -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var favorites by remember { mutableStateOf(FavoriteStore.getAll(context)) }
+    var showDeleteDialog by remember { mutableStateOf<FavoriteItem?>(null) }
+
+
+    // 삭제 확인 다이얼로그
+    showDeleteDialog?.let { itemToDelete ->
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = null },
+            title = { Text("즐겨찾기 삭제", color = Color.White, fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "\"${itemToDelete.title}\"을(를) 즐겨찾기에서 삭제하시겠습니까?",
+                    color = Color.White.copy(alpha = 0.8f)
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    FavoriteStore.remove(context, itemToDelete.id)
+                    favorites = FavoriteStore.getAll(context)
+                    showDeleteDialog = null
+                }) {
+                    Text("삭제", color = Color(0xFFEF4444), fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteDialog = null }) {
+                    Text("취소", color = Color(0xFF94A3B8))
+                }
+            },
+            containerColor = Color(0xFF1E293B),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp)
+        )
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Color(0xFF0C1122), Color(0xFF05070F))))
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Header
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(if (isTvMode) 32.dp else 16.dp),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                var isBackFocused by remember { mutableStateOf(false) }
+                IconButton(
+                    onClick = onBackClick,
+                    modifier = Modifier
+                        .onFocusChanged { isBackFocused = it.isFocused }
+                        .focusable()
+                        .onKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                onBackClick()
+                                true
+                            } else false
+                        }
+                        .background(
+                            color = if (isBackFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                        )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ArrowBack,
+                        contentDescription = "뒤로가기",
+                        tint = if (isBackFocused) Color.White else Color(0xFF94A3B8)
+                    )
+                }
+                Icon(
+                    imageVector = Icons.Default.Star,
+                    contentDescription = null,
+                    tint = Color(0xFFFFD700),
+                    modifier = Modifier.padding(start = 12.dp).size(24.dp)
+                )
+                Text(
+                    text = "즐겨찾기",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(start = 8.dp)
+                )
+                if (favorites.isNotEmpty()) {
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .background(Color(0xFFFFD700).copy(alpha = 0.2f), androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "${favorites.size}개",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFFFD700),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    
+                }
+            }
+
+            // 안내 메시지
+            Text(
+                text = "구글드라이브, ONE드라이브는 동영상 플레이시 로딩이 길수 있습니다.",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.Gray,
+                modifier = Modifier.padding(horizontal = if (isTvMode) 32.dp else 16.dp)
+            )
+
+            if (favorites.isEmpty()) {
+                // 빈 상태 UI
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = androidx.compose.ui.Alignment.Center
+                ) {
+                    Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.StarBorder,
+                            contentDescription = null,
+                            tint = Color(0xFF475569),
+                            modifier = Modifier.size(64.dp)
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Text(
+                            text = "즐겨찾기가 비어 있습니다",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color(0xFF64748B),
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "영상 목록에서 편집 모드를 활성화하고\n즐겨찾기를 추가하세요.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color(0xFF475569),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                }
+            } else {
+                androidx.compose.foundation.lazy.LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 80.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(favorites.size) { idx ->
+                        val favItem = favorites[idx]
+                        var isFocused by remember { mutableStateOf(false) }
+                        val itemFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+                        val deleteFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged { isFocused = it.hasFocus }
+                                .focusRequester(itemFocusRequester)
+                                .then(
+                                    if (isTvMode) {
+                                        Modifier
+                                            .onKeyEvent { event ->
+                                                if (event.key == Key.DirectionCenter || event.key == Key.Enter) {
+                                                    if (event.type == KeyEventType.KeyDown) {
+                                                        if (favItem.isDirectory) onNavigateToFolder(favItem)
+                                                        else onPlayVideo(favItem)
+                                                    }
+                                                    true
+                                                } else if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionRight) {
+                                                    try { deleteFocusRequester.requestFocus() } catch (_: Exception) {}
+                                                    true
+                                                } else false
+                                            }
+                                            .focusable()
+                                    } else {
+                                        Modifier.clickable {
+                                            if (favItem.isDirectory) onNavigateToFolder(favItem)
+                                            else onPlayVideo(favItem)
+                                        }
+                                    }
+                                )
+                                .border(
+                                    width = if (isTvMode && isFocused) 3.dp else 0.dp,
+                                    color = if (isTvMode && isFocused) Color(0xFFFFD700) else Color.Transparent,
+                                    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+                                ),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                                // 아이콘
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .background(
+                                            if (favItem.isDirectory) Color(0xFF3B82F6).copy(alpha = 0.15f)
+                                            else Color(0xFF8B5CF6).copy(alpha = 0.15f),
+                                            shape = androidx.compose.foundation.shape.CircleShape
+                                        ),
+                                    contentAlignment = androidx.compose.ui.Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = if (favItem.isDirectory) Icons.Default.Folder else Icons.Default.PlayArrow,
+                                        contentDescription = null,
+                                        tint = if (favItem.isDirectory) Color(0xFF60A5FA) else Color(0xFFA78BFA),
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                                Spacer(Modifier.width(14.dp))
+
+                                // 제목 + 소스 정보
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = favItem.title,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 2,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    // 출처 정보
+                                    val sourceLabel = when (favItem.sourceType) {
+                                        "LOCAL" -> "로컬"
+                                        "SMB" -> "SMB"
+                                        "WEBDAV" -> "WebDAV"
+                                        "FTP", "FTPS" -> "FTP"
+                                        "SFTP" -> "SFTP"
+                                        "DLNA" -> "DLNA"
+                                        "GOOGLE_DRIVE" -> "Google Drive"
+                                        "ONEDRIVE" -> "OneDrive"
+                                        else -> favItem.sourceType
+                                    }
+                                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                        Box(
+                                            modifier = Modifier
+                                                .background(
+                                                    Color(0xFF334155),
+                                                    shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp)
+                                                )
+                                                .padding(horizontal = 6.dp, vertical = 1.dp)
+                                        ) {
+                                            Text(
+                                                text = sourceLabel,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = Color(0xFF94A3B8),
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                        // 재생 위치 (동영상만)
+                                        if (!favItem.isDirectory && favItem.videoUrl.isNotEmpty()) {
+                                            val savedPos = PlaybackPositionStore.getPosition(context, favItem.videoUrl)
+                                            if (savedPos > 0L) {
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(
+                                                    text = "▶ ${PlaybackPositionStore.formatPosition(savedPos)}",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = Color(0xFF8B5CF6),
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+                                    }
+                                    // 프로그레스 바
+                                    if (!favItem.isDirectory && favItem.videoUrl.isNotEmpty()) {
+                                        val savedPos = PlaybackPositionStore.getPosition(context, favItem.videoUrl)
+                                        val savedDur = PlaybackPositionStore.getDuration(context, favItem.videoUrl)
+                                        if (savedPos > 0L && savedDur > 0L) {
+                                            Spacer(Modifier.height(6.dp))
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(4.dp)
+                                                    .background(
+                                                        Color.White.copy(alpha = 0.1f),
+                                                        shape = androidx.compose.foundation.shape.RoundedCornerShape(2.dp)
+                                                    )
+                                            ) {
+                                                val progress = (savedPos.toFloat() / savedDur.toFloat()).coerceIn(0f, 1f)
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth(progress)
+                                                        .fillMaxHeight()
+                                                        .background(
+                                                            Color(0xFF8B5CF6),
+                                                            shape = androidx.compose.foundation.shape.RoundedCornerShape(2.dp)
+                                                        )
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Spacer(Modifier.width(8.dp))
+
+                                // 삭제 버튼
+                                var isDeleteFocused by remember { mutableStateOf(false) }
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .background(
+                                            if (isDeleteFocused) Color(0xFFEF4444).copy(alpha = 0.3f) else Color.Transparent,
+                                            androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                                        )
+                                        .border(
+                                            width = if (isDeleteFocused) 2.dp else 0.dp,
+                                            color = if (isDeleteFocused) Color.White else Color.Transparent,
+                                            shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                                        )
+                                        .focusRequester(deleteFocusRequester)
+                                        .onFocusChanged { isDeleteFocused = it.isFocused }
+                                        .focusable()
+                                        .onKeyEvent { event ->
+                                            if (event.key == Key.DirectionCenter || event.key == Key.Enter) {
+                                                if (event.type == KeyEventType.KeyDown) showDeleteDialog = favItem
+                                                true
+                                            } else if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionLeft) {
+                                                try { itemFocusRequester.requestFocus() } catch (_: Exception) {}
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        }
+                                        .clickable { showDeleteDialog = favItem },
+                                    contentAlignment = androidx.compose.ui.Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Star,
+                                        contentDescription = "즐겨찾기 삭제",
+                                        tint = Color(0xFFFFD700),
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

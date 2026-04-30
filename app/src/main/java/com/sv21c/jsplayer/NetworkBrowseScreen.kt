@@ -4,8 +4,11 @@ import android.content.Context
 import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -24,12 +27,15 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
@@ -235,6 +241,7 @@ fun NetworkBrowseScreen(
                 IconButton(onClick = { loadPath(customPath) }) {
                     Icon(Icons.Default.Refresh, null, tint = MaterialTheme.colorScheme.onBackground)
                 }
+                
                 androidx.compose.foundation.layout.Spacer(Modifier.width(8.dp))
                 ExitAppButton()
             },
@@ -338,33 +345,170 @@ fun NetworkBrowseScreen(
                                 OneDriveManager.isVideoFile(item.name) && !item.isDirectory)
                             else -> return@itemsIndexed
                         }
-
                         val iconVector = if (isDir) Icons.Default.Folder else Icons.Default.PlayArrow
                         val iconTint = if (isDir) secondaryColor else primaryColor
                         val focusRequester = remember { FocusRequester() }
                         var isFocused by remember { mutableStateOf(false) }
 
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .focusRequester(focusRequester)
-                                .onFocusChanged { isFocused = it.isFocused }
-                                .clickable {
-                                    if (isDir) onFolderClick(path, name)
-                                    else if (isVideo) {
-                                        val playUrl = when (item) {
-                                            is GoogleDriveItem -> GoogleDriveManager.getStreamUrl(item.id)
-                                            is OneDriveItem -> item.downloadUrl ?: OneDriveManager.getStreamUrl(item.id)
-                                            else -> ""
-                                        }
-                                        handleVideoClick(
-                                            item, credentials, sortedItems, playUrl, name, context, coroutineScope, onVideoClick
-                                        )
+                        // 즐겨찾기 데이터 준비
+                        val showStar = isDir || isVideo
+                        val favVideoUrl = if (isVideo && showStar) getTargetPlayUrl(item, credentials) else ""
+                        val favSourcePath = if (showStar) when {
+                            credentials.type == "ONEDRIVE" && item is OneDriveItem -> item.id
+                            credentials.type == "GOOGLE_DRIVE" && item is GoogleDriveItem -> item.id
+                            else -> path
+                        } else ""
+                        var isFav by remember(favVideoUrl, favSourcePath) {
+                            mutableStateOf(if (showStar) FavoriteStore.isFavoriteByKey(context, favVideoUrl, favSourcePath) else false)
+                        }
+
+                        // 즐겨찾기 토글 실행 함수
+                        val doToggleFavorite: () -> Unit = {
+                            val (favSubUrl, favSubExt) = if (isVideo && !isDir) {
+                                val nameWithoutExt = name.substringBeforeLast(".")
+                                val subItem = sortedItems.find { candItem ->
+                                    val (candName, _, candIsDir) = when (candItem) {
+                                        is SmbItem -> Triple(candItem.name, candItem.path, candItem.isDirectory)
+                                        is WebDavItem -> Triple(candItem.name, candItem.href, candItem.isDirectory)
+                                        is FtpItem -> Triple(candItem.name, candItem.path, candItem.isDirectory)
+                                        is SftpItem -> Triple(candItem.name, candItem.path, candItem.isDirectory)
+                                        is GoogleDriveItem -> Triple(candItem.name, candItem.id, candItem.isDirectory)
+                                        is OneDriveItem -> Triple(candItem.name, candItem.downloadUrl ?: candItem.id, candItem.isDirectory)
+                                        else -> Triple("", "", true)
+                                    }
+                                    if (candIsDir || candItem == item) false
+                                    else {
+                                        val ext = candName.substringAfterLast(".", "").lowercase()
+                                        val candBase = candName.substringBeforeLast(".")
+                                        (ext == "smi" || ext == "srt" || ext == "ass" || ext == "vtt" || ext == "ssa" || ext == "sub" || ext == "txt") &&
+                                        (candBase.equals(nameWithoutExt, ignoreCase = true) || (candBase.startsWith(nameWithoutExt, ignoreCase = true) && candBase.getOrNull(nameWithoutExt.length) == '.'))
                                     }
                                 }
+                                if (subItem != null) {
+                                    val (sName, sPath) = when (subItem) {
+                                        is GoogleDriveItem -> subItem.name to subItem.id
+                                        is OneDriveItem -> subItem.name to subItem.id
+                                        is SmbItem -> subItem.name to subItem.path
+                                        is WebDavItem -> subItem.name to subItem.href
+                                        is FtpItem -> subItem.name to subItem.path
+                                        is SftpItem -> subItem.name to subItem.path
+                                        else -> "" to ""
+                                    }
+                                    val fullSubUrl = when (credentials.type) {
+                                        "WEBDAV" -> WebDavManager.buildAuthUrl(sPath, credentials.username, credentials.password)
+                                        "SMB" -> if (credentials.username.isNotBlank()) {
+                                            val authStr = "${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@"
+                                            sPath.replaceFirst("smb://", "smb://$authStr")
+                                        } else sPath
+                                        "FTP", "FTPS" -> {
+                                            val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
+                                            val scheme = if (credentials.type == "FTPS") "ftps://" else "ftp://"
+                                            val ftpHost = uri?.host ?: credentials.host.removePrefix(scheme).split("/")[0].split(":")[0]
+                                            val ftpPort = uri?.port?.takeIf { it > 0 } ?: 21
+                                            val portStr = if (ftpPort != 21) ":$ftpPort" else ""
+                                            val normSPath = if (sPath.startsWith("./")) sPath.substring(1) else (if (sPath.startsWith("/")) sPath else "/$sPath")
+                                            val encodedSPath = normSPath.split("/").joinToString("/") { android.net.Uri.encode(it) }
+                                            "$scheme${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$ftpHost$portStr$encodedSPath"
+                                        }
+                                        "SFTP" -> {
+                                            val uri = try { java.net.URI(credentials.host) } catch (_: Exception) { null }
+                                            val sftpHost = uri?.host ?: credentials.host.removePrefix("sftp://").split("/")[0].split(":")[0]
+                                            val sftpPort = uri?.port?.takeIf { it > 0 } ?: 22
+                                            val portStr = if (sftpPort != 22) ":$sftpPort" else ""
+                                            val normSPath = if (sPath.startsWith("./")) sPath.substring(1) else (if (sPath.startsWith("/")) sPath else "/$sPath")
+                                            val encodedSPath = normSPath.split("/").joinToString("/") { android.net.Uri.encode(it) }
+                                            "sftp://${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@$sftpHost$portStr$encodedSPath"
+                                        }
+                                        "GOOGLE_DRIVE" -> sPath
+                                        "ONEDRIVE" -> sPath
+                                        else -> sPath
+                                    }
+                                    fullSubUrl to sName.substringAfterLast(".", "").lowercase()
+                                } else null to null
+                            } else null to null
+
+                            val favItem = FavoriteItem(
+                                id = java.util.UUID.randomUUID().toString(),
+                                title = name,
+                                videoUrl = favVideoUrl,
+                                isDirectory = isDir,
+                                sourceType = credentials.type,
+                                sourcePath = favSourcePath,
+                                addedAt = System.currentTimeMillis(),
+                                subtitleUrl = favSubUrl,
+                                subtitleExtension = favSubExt,
+                                credentialsJson = credentials.toJson().toString()
+                            )
+                            isFav = FavoriteStore.toggle(context, favItem)
+                        }
+
+                        var isCardFocused by remember { mutableStateOf(false) }
+                        var isStarFocused by remember { mutableStateOf(false) }
+                        val itemFocusRequester = remember { FocusRequester() }
+
+                        @OptIn(ExperimentalFoundationApi::class)
+                        Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .onFocusChanged { 
+                                            isCardFocused = it.hasFocus 
+                                            if (!it.hasFocus) isStarFocused = false
+                                        }
+                                        .focusRequester(itemFocusRequester)
+                                .then(
+                                    if (isTvMode) {
+                                        Modifier
+                                            .onKeyEvent { event ->
+                                                if (event.key == Key.DirectionCenter || event.key == Key.Enter) {
+                                                    if (event.type == KeyEventType.KeyDown) {
+                                                        if (isStarFocused && showStar) {
+                                                            doToggleFavorite()
+                                                            val msg = if (isFav) "\"$name\" 즐겨찾기에 추가됨 ★" else "\"$name\" 즐겨찾기에서 제거됨"
+                                                            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+                                                        } else {
+                                                            if (isDir) onFolderClick(path, name)
+                                                            else if (isVideo) {
+                                                                val playUrl = when (item) {
+                                                                    is GoogleDriveItem -> GoogleDriveManager.getStreamUrl(item.id)
+                                                                    is OneDriveItem -> item.downloadUrl ?: OneDriveManager.getStreamUrl(item.id)
+                                                                    else -> ""
+                                                                }
+                                                                handleVideoClick(
+                                                                    item, credentials, sortedItems, playUrl, name, context, coroutineScope, onVideoClick
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                    return@onKeyEvent true
+                                                } else if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionRight && showStar) {
+                                                    isStarFocused = true
+                                                    return@onKeyEvent true
+                                                } else if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionLeft && isStarFocused) {
+                                                    isStarFocused = false
+                                                    return@onKeyEvent true
+                                                }
+                                                false
+                                            }
+                                            .focusable()
+                                    } else {
+                                        Modifier.clickable {
+                                            if (isDir) onFolderClick(path, name)
+                                            else if (isVideo) {
+                                                val playUrl = when (item) {
+                                                    is GoogleDriveItem -> GoogleDriveManager.getStreamUrl(item.id)
+                                                    is OneDriveItem -> item.downloadUrl ?: OneDriveManager.getStreamUrl(item.id)
+                                                    else -> ""
+                                                }
+                                                handleVideoClick(
+                                                    item, credentials, sortedItems, playUrl, name, context, coroutineScope, onVideoClick
+                                                )
+                                            }
+                                        }
+                                    }
+                                )
                                 .border(
-                                    width = if (isTvMode && isFocused) 3.dp else 0.dp,
-                                    color = if (isTvMode && isFocused) primaryColor else Color.Transparent,
+                                    width = if (isTvMode && isCardFocused) 3.dp else 0.dp,
+                                    color = if (isTvMode && isCardFocused) primaryColor else Color.Transparent,
                                     shape = RoundedCornerShape(12.dp)
                                 ),
                             shape = RoundedCornerShape(12.dp),
@@ -435,6 +579,35 @@ fun NetworkBrowseScreen(
                                                 }
                                             }
                                         }
+                                    }
+                                }
+
+                                if (showStar) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .background(
+                                                if (isCardFocused && isStarFocused) primaryColor.copy(0.3f) else Color.Transparent,
+                                                RoundedCornerShape(8.dp)
+                                            )
+                                            .border(
+                                                width = if (isCardFocused && isStarFocused) 2.dp else 0.dp,
+                                                color = if (isCardFocused && isStarFocused) Color.White else Color.Transparent,
+                                                shape = RoundedCornerShape(8.dp)
+                                            )
+                                            .clickable {
+                                                doToggleFavorite()
+                                                val msg = if (isFav) "\"$name\" 즐겨찾기에 추가됨 ★" else "\"$name\" 즐겨찾기에서 제거됨"
+                                                android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+                                            },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isFav) Icons.Filled.Star else Icons.Default.StarBorder,
+                                            contentDescription = "즐겨찾기 토글",
+                                            tint = if (isFav) Color(0xFFFFD700) else Color.Gray.copy(alpha = 0.5f),
+                                            modifier = Modifier.size(28.dp)
+                                        )
                                     }
                                 }
                             }
