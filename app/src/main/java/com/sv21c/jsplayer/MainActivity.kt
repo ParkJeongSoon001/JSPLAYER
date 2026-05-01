@@ -2044,6 +2044,70 @@ fun ExitAppButton() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+fun FileListViewSettingsDialog(
+    onDismiss: () -> Unit,
+    context: android.content.Context
+) {
+    var showPlayHistory by remember { mutableStateOf(SettingsStore.getShowListPlayHistory(context)) }
+    var showFileInfo by remember { mutableStateOf(SettingsStore.getShowListFileInfo(context)) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                "파일리스트 보기 설정",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("플레이 진행 바 및 시간 표시", style = MaterialTheme.typography.bodyLarge)
+                        Text("시청했던 영상의 남은 시간과 진행률 바를 표시합니다.", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    }
+                    Switch(
+                        checked = showPlayHistory,
+                        onCheckedChange = { 
+                            showPlayHistory = it
+                            SettingsStore.saveShowListPlayHistory(context, it)
+                        }
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("파일 상세 정보 표시", style = MaterialTheme.typography.bodyLarge)
+                        Text("제목 하단에 총 플레이 시간, 해상도, 파일 크기를 표시합니다.", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    }
+                    Switch(
+                        checked = showFileInfo,
+                        onCheckedChange = { 
+                            showFileInfo = it
+                            SettingsStore.saveShowListFileInfo(context, it)
+                        }
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("닫기")
+            }
+        }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 fun ServerListScreen(
     padding: PaddingValues,
     devices: List<Device<*, *, *>>,
@@ -2054,6 +2118,13 @@ fun ServerListScreen(
     onBackClick: () -> Unit,
     onRefresh: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var showSettings by remember { mutableStateOf(false) }
+
+    if (showSettings) {
+        FileListViewSettingsDialog(onDismiss = { showSettings = false }, context = context)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -2236,6 +2307,9 @@ fun BrowseScreen(
     var sortMenuExpanded by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
+
+    val showListPlayHistory = SettingsStore.getShowListPlayHistory(context)
+    val showListFileInfo = SettingsStore.getShowListFileInfo(context)
 
     val sortedItems = remember(items, sortOrder, searchQuery) {
         val filtered = if (searchQuery.isNotEmpty()) {
@@ -2494,24 +2568,35 @@ fun BrowseScreen(
                                 )
                             }
                             Spacer(modifier = Modifier.width(16.dp))
+                            val dlnaContext = androidx.compose.ui.platform.LocalContext.current
+                            val videoRes = if (!isFolder && item is Item) {
+                                item.resources.find { it.protocolInfo.contentFormat.startsWith("video/") || it.protocolInfo.contentFormat.startsWith("audio/") } ?: item.firstResource
+                            } else null
+                            val videoUrlForSave = videoRes?.value ?: ""
+                            val savedPos = if (videoUrlForSave.isNotEmpty()) PlaybackPositionStore.getPosition(dlnaContext, videoUrlForSave) else 0L
+
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = item.title ?: "Unknown", 
                                     style = MaterialTheme.typography.bodyLarge,
-                                    color = MaterialTheme.colorScheme.onSurface,
+                                    color = if (savedPos > 0L) Color(0xFFBB86FC) else MaterialTheme.colorScheme.onSurface,
                                     fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
                                 )
                                 if (!isFolder && item.resources.isNotEmpty()) {
                                     val res = item.firstResource
-                                    // 재생 시간 파싱 (HH:MM:SS or H:MM:SS.xxx 형식)
                                     val durationStr = res?.duration
                                     val durationDisplay = durationStr?.substringBefore(".")?.trim() ?: ""
                                     val resInfo = res?.resolution ?: ""
+                                    val sizeVal = res?.size ?: 0L
+                                    val sizeDisplay = if (sizeVal > 0) android.text.format.Formatter.formatShortFileSize(dlnaContext, sizeVal) else ""
+                                    
                                     val info = listOfNotNull(
-                                        if (durationDisplay.isNotEmpty()) durationDisplay else null,
-                                        if (resInfo.isNotEmpty()) resInfo else null
+                                        durationDisplay.takeIf { it.isNotEmpty() },
+                                        resInfo.takeIf { it.isNotEmpty() },
+                                        sizeDisplay.takeIf { it.isNotEmpty() }
                                     ).joinToString(" | ")
-                                    if (info.isNotEmpty()) {
+                                    
+                                    if (info.isNotEmpty() && showListFileInfo) {
                                         Text(
                                             text = info, 
                                             style = MaterialTheme.typography.bodySmall, 
@@ -2521,47 +2606,39 @@ fun BrowseScreen(
                                 }
                             }
                             // 저장된 재생 위치 표시 (시간 + 프로그레스 바)
-                            if (!isFolder && item is Item) {
-                                val videoRes = item.resources.find { it.protocolInfo.contentFormat.startsWith("video/") || it.protocolInfo.contentFormat.startsWith("audio/") } ?: item.firstResource
-                                val videoUrlForSave = videoRes?.value ?: ""
-                                if (videoUrlForSave.isNotEmpty()) {
-                                    val dlnaContext = androidx.compose.ui.platform.LocalContext.current
-                                    val savedPos = PlaybackPositionStore.getPosition(dlnaContext, videoUrlForSave)
-                                    if (savedPos > 0L) {
-                                        val savedDur = PlaybackPositionStore.getDuration(dlnaContext, videoUrlForSave)
-                                        Column(
-                                            horizontalAlignment = androidx.compose.ui.Alignment.End,
-                                            modifier = Modifier.padding(start = 12.dp).width(72.dp)
+                            if (savedPos > 0L && showListPlayHistory) {
+                                val savedDur = PlaybackPositionStore.getDuration(dlnaContext, videoUrlForSave)
+                                Column(
+                                    horizontalAlignment = androidx.compose.ui.Alignment.End,
+                                    modifier = Modifier.padding(start = 12.dp).width(48.dp)
+                                ) {
+                                    Text(
+                                        text = "▶ " + PlaybackPositionStore.formatPosition(savedPos),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                    )
+                                    if (savedDur > 0L) {
+                                        Spacer(Modifier.height(4.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(2.dp)
+                                                .background(
+                                                    Color.White.copy(alpha = 0.2f),
+                                                    shape = androidx.compose.foundation.shape.RoundedCornerShape(1.dp)
+                                                )
                                         ) {
-                                            Text(
-                                                text = "▶ " + PlaybackPositionStore.formatPosition(savedPos),
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.primary,
-                                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
-                                            )
-                                            if (savedDur > 0L) {
-                                                Spacer(Modifier.height(4.dp))
-                                                Box(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .height(6.dp)
-                                                        .background(
-                                                            Color.White.copy(alpha = 0.2f),
-                                                            shape = androidx.compose.foundation.shape.RoundedCornerShape(3.dp)
-                                                        )
-                                                ) {
-                                                    val progress = (savedPos.toFloat() / savedDur.toFloat()).coerceIn(0f, 1f)
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .fillMaxWidth(progress)
-                                                            .fillMaxHeight()
-                                                            .background(
-                                                                MaterialTheme.colorScheme.primary,
-                                                                shape = androidx.compose.foundation.shape.RoundedCornerShape(3.dp)
-                                                            )
+                                            val progress = (savedPos.toFloat() / savedDur.toFloat()).coerceIn(0f, 1f)
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth(progress)
+                                                    .fillMaxHeight()
+                                                    .background(
+                                                        MaterialTheme.colorScheme.primary,
+                                                        shape = androidx.compose.foundation.shape.RoundedCornerShape(1.dp)
                                                     )
-                                                }
-                                            }
+                                            )
                                         }
                                     }
                                 }
@@ -5260,6 +5337,9 @@ fun LocalBrowserScreen(
     val context = androidx.compose.ui.platform.LocalContext.current
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
+    val showListPlayHistory = SettingsStore.getShowListPlayHistory(context)
+    val showListFileInfo = SettingsStore.getShowListFileInfo(context)
+
     // 폴더 목록 추출 (videos가 바뀔 때마다 계산)
     val folders = remember(videos, searchQuery) {
         val baseFolders = videos.mapNotNull { it.path?.substringBeforeLast("/") }
@@ -5659,25 +5739,28 @@ fun LocalBrowserScreen(
                                 }
                                 Spacer(modifier = Modifier.width(16.dp))
                                 Column(modifier = Modifier.weight(1f)) {
+                                    val isPlayed = PlayHistoryStore.getLastPlayed(context, video.uri.toString()) > 0L
                                     Text(
                                         text = video.title, 
                                         style = MaterialTheme.typography.bodyLarge,
-                                        color = MaterialTheme.colorScheme.onSurface,
+                                        color = if (isPlayed) Color(0xFFA78BFA) else MaterialTheme.colorScheme.onSurface,
                                         fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
                                         maxLines = 2,
                                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                     )
                                     val sizeMb = video.size / (1024.0 * 1024.0)
                                     val durationText = formatSrtTime(video.duration).substringBefore(",") // Basic formatting
-                                    Text(
-                                        text = String.format(java.util.Locale.US, "%.1f MB • %s", sizeMb, durationText), 
-                                        style = MaterialTheme.typography.bodySmall, 
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                                    if (showListFileInfo) {
+                                        Text(
+                                            text = String.format(java.util.Locale.US, "%.1f MB • %s", sizeMb, durationText), 
+                                            style = MaterialTheme.typography.bodySmall, 
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                 }
                                 // 저장된 재생 위치 표시 (시간 + 프로그레스 바)
                                 val savedPos = PlaybackPositionStore.getPosition(context, video.uri.toString())
-                                if (savedPos > 0L) {
+                                if (savedPos > 0L && showListPlayHistory) {
                                     val savedDur = PlaybackPositionStore.getDuration(context, video.uri.toString())
                                     val effectiveDur = if (savedDur > 0L) savedDur else if (video.duration > 0) video.duration else 0L
                                     Column(
@@ -6570,6 +6653,48 @@ fun HomeScreen(
                     }
                 }
 
+                Spacer(Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    var showListViewSettings by remember { mutableStateOf(false) }
+                    if (showListViewSettings) {
+                        FileListViewSettingsDialog(
+                            onDismiss = { showListViewSettings = false }, 
+                            context = androidx.compose.ui.platform.LocalContext.current
+                        )
+                    }
+
+                    var isListViewSettingsFocused by remember { mutableStateOf(false) }
+                    TextButton(
+                        onClick = { showListViewSettings = true },
+                        modifier = Modifier
+                            .onFocusChanged { isListViewSettingsFocused = it.isFocused }
+                            .focusable()
+                            .onKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                    showListViewSettings = true
+                                    true
+                                } else false
+                            }
+                            .background(
+                                color = if (isListViewSettingsFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
+                                shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                            ),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                    ) {
+                        Text(
+                            text = "[파일리스트 보기 설정]",
+                            color = if (isListViewSettingsFocused) Color.White else Color(0xFF94A3B8),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                        )
+                    }
+                }
+
                 Spacer(Modifier.height(32.dp))
             }
         }
@@ -6858,7 +6983,7 @@ fun FavoritesScreen(
     val context = androidx.compose.ui.platform.LocalContext.current
     var favorites by remember { mutableStateOf(FavoriteStore.getAll(context)) }
     var showDeleteDialog by remember { mutableStateOf<FavoriteItem?>(null) }
-
+    val showListPlayHistory = SettingsStore.getShowListPlayHistory(context)
 
     // 삭제 확인 다이얼로그
     showDeleteDialog?.let { itemToDelete ->
@@ -7107,7 +7232,7 @@ fun FavoritesScreen(
                                             )
                                         }
                                         // 재생 위치 (동영상만)
-                                        if (!favItem.isDirectory && favItem.videoUrl.isNotEmpty()) {
+                                        if (!favItem.isDirectory && favItem.videoUrl.isNotEmpty() && showListPlayHistory) {
                                             val savedPos = PlaybackPositionStore.getPosition(context, favItem.videoUrl)
                                             if (savedPos > 0L) {
                                                 Spacer(Modifier.width(8.dp))
@@ -7121,7 +7246,7 @@ fun FavoritesScreen(
                                         }
                                     }
                                     // 프로그레스 바
-                                    if (!favItem.isDirectory && favItem.videoUrl.isNotEmpty()) {
+                                    if (!favItem.isDirectory && favItem.videoUrl.isNotEmpty() && showListPlayHistory) {
                                         val savedPos = PlaybackPositionStore.getPosition(context, favItem.videoUrl)
                                         val savedDur = PlaybackPositionStore.getDuration(context, favItem.videoUrl)
                                         if (savedPos > 0L && savedDur > 0L) {

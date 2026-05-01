@@ -48,6 +48,11 @@ fun NetworkServerListScreen(
     var savedServers by remember { mutableStateOf<List<ServerCredentials>>(emptyList()) }
     val discoveredServers = remember { mutableStateListOf<DiscoveredServer>() }
     var isScanning by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+
+    if (showSettings) {
+        FileListViewSettingsDialog(onDismiss = { showSettings = false }, context = context)
+    }
     var scanProgress by remember { mutableIntStateOf(0) }
     var showDialog by remember { mutableStateOf(false) }
     var prefillHost by remember { mutableStateOf("") }

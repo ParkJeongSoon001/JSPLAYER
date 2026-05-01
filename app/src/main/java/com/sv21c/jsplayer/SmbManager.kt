@@ -12,6 +12,7 @@ data class SmbItem(
     val name: String,
     val path: String,   // smb://host/share/path/
     val isDirectory: Boolean,
+    val size: Long = 0L,
     val lastModified: Long = 0L
 )
 
@@ -52,6 +53,7 @@ object SmbManager {
                         name = file.name.trimEnd('/'),
                         path = file.url.toString(),
                         isDirectory = file.isDirectory,
+                        size = try { file.length() } catch (e: Exception) { 0L },
                         lastModified = file.lastModified()
                     )
                 } catch (e: Exception) {

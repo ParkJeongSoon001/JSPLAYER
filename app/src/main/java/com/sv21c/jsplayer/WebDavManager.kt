@@ -11,6 +11,7 @@ data class WebDavItem(
     val name: String,
     val href: String,       // Full URL
     val isDirectory: Boolean,
+    val size: Long = 0L,
     val contentLength: Long = 0L,
     val lastModified: Long = 0L
 )
@@ -113,6 +114,7 @@ object WebDavManager {
                     name = res.name ?: resHref.trimEnd('/').substringAfterLast('/').ifBlank { "unknown" },
                     href = fullUrl,
                     isDirectory = res.isDirectory,
+                    size = res.contentLength ?: 0L,
                     contentLength = res.contentLength ?: 0L,
                     lastModified = res.modified?.time ?: 0L
                 )

@@ -73,6 +73,9 @@ fun NetworkBrowseScreen(
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
     
+    val showListPlayHistory = SettingsStore.getShowListPlayHistory(context)
+    val showListFileInfo = SettingsStore.getShowListFileInfo(context)
+    
     val primaryColor = MaterialTheme.colorScheme.primary
     val secondaryColor = MaterialTheme.colorScheme.secondary
     val accentColor = when (credentials.type) {
@@ -528,55 +531,79 @@ fun NetworkBrowseScreen(
                                     Icon(iconVector, null, tint = iconTint, modifier = Modifier.size(22.dp))
                                 }
                                 Spacer(Modifier.width(14.dp))
-                                Text(
-                                    text = name,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = if (!isDir && !isVideo)
-                                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                    else MaterialTheme.colorScheme.onSurface,
-                                    fontWeight = FontWeight.Medium,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f)
-                                )
+                                val playUrlForSave = if (isVideo) getTargetPlayUrl(item, credentials) else ""
+                                val savedPos = if (isVideo && playUrlForSave.isNotEmpty()) PlaybackPositionStore.getPosition(context, playUrlForSave) else 0L
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = name,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = if (!isDir && !isVideo)
+                                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                        else if (savedPos > 0L)
+                                            Color(0xFFBB86FC)
+                                        else MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    val sizeVal = when (item) {
+                                        is SmbItem -> item.size
+                                        is WebDavItem -> item.size
+                                        is FtpItem -> item.size
+                                        is SftpItem -> item.size
+                                        is GoogleDriveItem -> item.size ?: 0L
+                                        is OneDriveItem -> item.size ?: 0L
+                                        else -> 0L
+                                    }
+                                    val sizeDisplay = if (sizeVal > 0) android.text.format.Formatter.formatShortFileSize(context, sizeVal) else ""
+                                    
+                                    val info = listOfNotNull(
+                                        sizeDisplay.takeIf { it.isNotEmpty() }
+                                    ).joinToString(" | ")
+                                    
+                                    if (info.isNotEmpty() && showListFileInfo) {
+                                        Text(
+                                            text = info, 
+                                            style = MaterialTheme.typography.bodySmall, 
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
                                 // 저장된 재생 위치 표시 (시간 + 프로그레스 바)
-                                if (isVideo) {
-                                    val playUrlForSave = getTargetPlayUrl(item, credentials)
-                                    val savedPos = PlaybackPositionStore.getPosition(context, playUrlForSave)
-                                    if (savedPos > 0L) {
-                                        val savedDur = PlaybackPositionStore.getDuration(context, playUrlForSave)
-                                        Column(
-                                            horizontalAlignment = androidx.compose.ui.Alignment.End,
-                                            modifier = Modifier.padding(start = 12.dp).width(72.dp)
-                                        ) {
-                                            Text(
-                                                text = "▶ " + PlaybackPositionStore.formatPosition(savedPos),
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.primary,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                            if (savedDur > 0L) {
-                                                Spacer(Modifier.height(4.dp))
+                                if (savedPos > 0L && showListPlayHistory) {
+                                    val savedDur = PlaybackPositionStore.getDuration(context, playUrlForSave)
+                                    Column(
+                                        horizontalAlignment = androidx.compose.ui.Alignment.End,
+                                        modifier = Modifier.padding(start = 12.dp).width(48.dp)
+                                    ) {
+                                        Text(
+                                            text = "▶ " + PlaybackPositionStore.formatPosition(savedPos),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        if (savedDur > 0L) {
+                                            Spacer(Modifier.height(4.dp))
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(2.dp)
+                                                    .background(
+                                                        Color.White.copy(alpha = 0.2f),
+                                                        shape = RoundedCornerShape(1.dp)
+                                                    )
+                                            ) {
+                                                val progress = (savedPos.toFloat() / savedDur.toFloat()).coerceIn(0f, 1f)
                                                 Box(
                                                     modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .height(6.dp)
+                                                        .fillMaxWidth(progress)
+                                                        .fillMaxHeight()
                                                         .background(
-                                                            Color.White.copy(alpha = 0.2f),
-                                                            shape = RoundedCornerShape(3.dp)
+                                                            MaterialTheme.colorScheme.primary,
+                                                            shape = RoundedCornerShape(1.dp)
                                                         )
-                                                ) {
-                                                    val progress = (savedPos.toFloat() / savedDur.toFloat()).coerceIn(0f, 1f)
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .fillMaxWidth(progress)
-                                                            .fillMaxHeight()
-                                                            .background(
-                                                                MaterialTheme.colorScheme.primary,
-                                                                shape = RoundedCornerShape(3.dp)
-                                                            )
-                                                    )
-                                                }
+                                                )
                                             }
                                         }
                                     }
