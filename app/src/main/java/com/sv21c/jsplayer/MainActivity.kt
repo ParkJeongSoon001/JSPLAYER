@@ -2238,8 +2238,8 @@ fun DeviceItem(
             .onFocusChanged { isFocused = it.isFocused }
             .focusable()
             .onKeyEvent { event ->
-                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
-                    onDeviceClick(device)
+                if (event.key == Key.DirectionCenter || event.key == Key.Enter) {
+                    if (event.type == KeyEventType.KeyUp) onDeviceClick(device)
                     true
                 } else false
             }
@@ -2511,7 +2511,7 @@ fun BrowseScreen(
                                     Modifier
                                         .onKeyEvent { event ->
                                             if (event.key == Key.DirectionCenter || event.key == Key.Enter) {
-                                                if (event.type == KeyEventType.KeyDown) {
+                                                if (event.type == KeyEventType.KeyUp) {
                                                     if (isStarFocused) {
                                                         val favItem = FavoriteItem(
                                                             id = java.util.UUID.randomUUID().toString(),
@@ -3050,6 +3050,8 @@ fun VideoPlayerScreen(
         val finalHeaders = httpHeaders.toMutableMap()
         val httpDataSourceFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(30000)
+            .setReadTimeoutMs(30000)
             
         try {
             val uri = android.net.Uri.parse(videoUrl)
@@ -3125,9 +3127,31 @@ fun VideoPlayerScreen(
         val mediaSourceFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context)
             .setDataSourceFactory(customDataSourceFactory)
 
+        // 외부 파일 탐색기(Solid Explorer 등)의 로컬 프록시 URL 감지
+        val isLocalProxyUrl = try {
+            val parsedUri = android.net.Uri.parse(finalVideoUrl)
+            val host = parsedUri.host
+            parsedUri.scheme?.lowercase()?.startsWith("http") == true &&
+                (host == "127.0.0.1" || host == "localhost" || host == "0.0.0.0")
+        } catch (_: Exception) { false }
+
+        if (isLocalProxyUrl) {
+            android.util.Log.d("VideoPlayerScreen", "[PROXY] 로컬 프록시 URL 감지: $finalVideoUrl")
+        }
+
+        val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                if (isLocalProxyUrl) 50000 else 32000,   // 프록시일 때 버퍼 확대
+                if (isLocalProxyUrl) 262144 else 131072,  // maxBufferMs
+                if (isLocalProxyUrl) 5000 else 2500,      // bufferForPlaybackMs
+                if (isLocalProxyUrl) 10000 else 5000      // bufferForPlaybackAfterRebufferMs
+            )
+            .build()
+
         ExoPlayer.Builder(context, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setTrackSelector(trackSelector)
+            .setLoadControl(loadControl)
             .build().apply {
                 val mediaMetadata = androidx.media3.common.MediaMetadata.Builder()
                     .setTitle(title)
@@ -3164,7 +3188,32 @@ fun VideoPlayerScreen(
                         .build()
                     mediaItemBuilder.setSubtitleConfigurations(listOf(subtitleConfig))
                 }
-                setMediaItem(mediaItemBuilder.build())
+                val mediaItem = mediaItemBuilder.build()
+
+                // 프록시 URL인 경우 CacheDataSource + ProgressiveMediaSource
+                if (isLocalProxyUrl) {
+                    // 프록시 서버는 Range 요청을 무시하고 무조건 처음부터 전송하므로,
+                    // MKV 파일 끝의 Index(Cues)를 찾으려고 수 기가바이트를 스킵하는 것을 막기 위해
+                    // 강제로 '길이를 알 수 없는 라이브 스트림'으로 인식시킵니다.
+                    val upstreamFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                        .setConnectTimeoutMs(60000)
+                        .setReadTimeoutMs(120000)
+                        .setAllowCrossProtocolRedirects(true)
+                    val unseekableFactory = UnseekableDataSource.Factory(upstreamFactory)
+                    
+                    // Extractor 자체에서도 Seek를 완전히 비활성화합니다.
+                    val extractorsFactory = androidx.media3.extractor.DefaultExtractorsFactory()
+                        .setConstantBitrateSeekingEnabled(false)
+                        .setMatroskaExtractorFlags(androidx.media3.extractor.mkv.MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES)
+                        
+                    val progressiveFactory = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(unseekableFactory, extractorsFactory)
+                        .setContinueLoadingCheckIntervalBytes(256 * 1024)
+                    val mediaSource = progressiveFactory.createMediaSource(mediaItem)
+                    setMediaSource(mediaSource)
+                    android.util.Log.d("VideoPlayerScreen", "[PROXY] CacheDataSource + ProgressiveMediaSource로 재생 시작")
+                } else {
+                    setMediaItem(mediaItem)
+                }
                 prepare()
                 
                 // --- 디버깅 로그 추가 ---
@@ -7141,7 +7190,7 @@ fun FavoritesScreen(
                                         Modifier
                                             .onKeyEvent { event ->
                                                 if (event.key == Key.DirectionCenter || event.key == Key.Enter) {
-                                                    if (event.type == KeyEventType.KeyDown) {
+                                                    if (event.type == KeyEventType.KeyUp) {
                                                         if (favItem.isDirectory) onNavigateToFolder(favItem)
                                                         else onPlayVideo(favItem)
                                                     }
@@ -7296,7 +7345,7 @@ fun FavoritesScreen(
                                         .focusable()
                                         .onKeyEvent { event ->
                                             if (event.key == Key.DirectionCenter || event.key == Key.Enter) {
-                                                if (event.type == KeyEventType.KeyDown) showDeleteDialog = favItem
+                                                if (event.type == KeyEventType.KeyUp) showDeleteDialog = favItem
                                                 true
                                             } else if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionLeft) {
                                                 try { itemFocusRequester.requestFocus() } catch (_: Exception) {}

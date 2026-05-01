@@ -496,7 +496,7 @@ fun NetworkBrowseScreen(
                                         Modifier
                                             .onKeyEvent { event ->
                                                 if (event.key == Key.DirectionCenter || event.key == Key.Enter) {
-                                                    if (event.type == KeyEventType.KeyDown) {
+                                                    if (event.type == KeyEventType.KeyUp) {
                                                         if (isStarFocused && showStar) {
                                                             doToggleFavorite()
                                                             val msg = if (isFav) "\"$name\" 즐겨찾기에 추가됨 ★" else "\"$name\" 즐겨찾기에서 제거됨"

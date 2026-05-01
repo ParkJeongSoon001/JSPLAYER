@@ -395,7 +395,7 @@ private fun SavedServerCard(
             .focusable()
             .onKeyEvent { e ->
                 if (e.key == Key.DirectionCenter || e.key == Key.Enter) {
-                    if (e.type == KeyEventType.KeyDown) onConnect()
+                    if (e.type == KeyEventType.KeyUp) onConnect()
                     true
                 } else if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight) {
                     try { editFocusRequester.requestFocus() } catch (_: Exception) {}
@@ -442,7 +442,7 @@ private fun SavedServerCard(
                     .focusable()
                     .onKeyEvent { e ->
                         if (e.key == Key.DirectionCenter || e.key == Key.Enter) {
-                            if (e.type == KeyEventType.KeyDown) onEdit()
+                            if (e.type == KeyEventType.KeyUp) onEdit()
                             true
                         } else if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight) {
                             try { deleteFocusRequester.requestFocus() } catch (_: Exception) {}
@@ -477,7 +477,7 @@ private fun SavedServerCard(
                     .focusable()
                     .onKeyEvent { e ->
                         if (e.key == Key.DirectionCenter || e.key == Key.Enter) {
-                            if (e.type == KeyEventType.KeyDown) onDelete()
+                            if (e.type == KeyEventType.KeyUp) onDelete()
                             true
                         } else if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft) {
                             try { editFocusRequester.requestFocus() } catch (_: Exception) {}
@@ -524,7 +524,10 @@ private fun DiscoveredServerCard(
             .onFocusChanged { isFocused = it.isFocused }
             .focusable()
             .onKeyEvent { e ->
-                if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionCenter) { onClick(); true } else false
+                if (e.key == Key.DirectionCenter || e.key == Key.Enter) {
+                    if (e.type == KeyEventType.KeyUp) onClick()
+                    true
+                } else false
             }
             .clickable { onClick() },
         shape = RoundedCornerShape(12.dp),

@@ -11,8 +11,8 @@ android {
         applicationId = "com.sv21c.jsplayer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 123
-        versionName = "1.2.3"
+        versionCode = 124
+        versionName = "1.2.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -86,6 +86,7 @@ dependencies {
     implementation("androidx.media3:media3-ui:$media3_version")
     implementation("androidx.media3:media3-session:$media3_version")
     implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.5.0+1")
+    implementation("androidx.media3:media3-datasource-okhttp:$media3_version")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 
     // ── SMB / WebDAV 지원 ─────────────────────────────────────────
