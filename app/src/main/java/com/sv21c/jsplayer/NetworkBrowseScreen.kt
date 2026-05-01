@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -72,6 +73,7 @@ fun NetworkBrowseScreen(
     var showSortMenu by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
+    var showDisconnectDialog by remember { mutableStateOf(false) }
     
     val showListPlayHistory = SettingsStore.getShowListPlayHistory(context)
     val showListFileInfo = SettingsStore.getShowListFileInfo(context)
@@ -245,11 +247,42 @@ fun NetworkBrowseScreen(
                     Icon(Icons.Default.Refresh, null, tint = MaterialTheme.colorScheme.onBackground)
                 }
                 
+                if (credentials.type == "GOOGLE_DRIVE") {
+                    IconButton(onClick = { showDisconnectDialog = true }) {
+                        Icon(Icons.Default.ExitToApp, contentDescription = "구글 연결 해제", tint = MaterialTheme.colorScheme.onBackground)
+                    }
+                }
+
                 androidx.compose.foundation.layout.Spacer(Modifier.width(8.dp))
                 ExitAppButton()
             },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
         )
+
+        if (showDisconnectDialog) {
+            AlertDialog(
+                onDismissRequest = { showDisconnectDialog = false },
+                title = { Text("구글 계정 연결 해제") },
+                text = { Text("구글 드라이브 연결을 해제하시겠습니까?") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showDisconnectDialog = false
+                            GoogleDriveAuthManager.signOut(context)
+                            android.widget.Toast.makeText(context, "구글 계정 연결이 해제되었습니다.", android.widget.Toast.LENGTH_SHORT).show()
+                            onBackClick()
+                        }
+                    ) {
+                        Text("해제", color = MaterialTheme.colorScheme.error)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDisconnectDialog = false }) {
+                        Text("취소")
+                    }
+                }
+            )
+        }
 
         when {
             isLoading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
