@@ -5316,6 +5316,7 @@ fun convertSmiToSrt(smiText: String): String {
             var cleanText = rawText.replace(Regex("(?i)<br\\s*/?>"), "\n")
             cleanText = cleanText.replace(Regex("<[^>]+>"), "")
             cleanText = cleanText.replace("&nbsp;", " ")
+            cleanText = cleanText.replace("\r\n", "\n").replace(Regex("\n{2,}"), "\n")
             cleanText = cleanText.trim()
             
             if (currentStart != -1L && currentText.isNotBlank()) {
