@@ -57,6 +57,8 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.graphics.graphicsLayer
 import kotlinx.coroutines.delay
 import android.Manifest
 import android.content.pm.PackageManager
@@ -2907,6 +2909,20 @@ fun VideoPlayerScreen(
             showVolumeIndicator = false
         }
     }
+
+    // For Pinch-to-Zoom (YouTube style)
+    var zoomScale by remember { mutableFloatStateOf(1f) }
+    var zoomOffsetX by remember { mutableFloatStateOf(0f) }
+    var zoomOffsetY by remember { mutableFloatStateOf(0f) }
+    var showZoomIndicator by remember { mutableStateOf(false) }
+    var zoomIndicatorText by remember { mutableStateOf("1.0x") }
+
+    LaunchedEffect(showZoomIndicator) {
+        if (showZoomIndicator) {
+            delay(1200L)
+            showZoomIndicator = false
+        }
+    }
     
     val currentIsControlVisible by androidx.compose.runtime.rememberUpdatedState(isControlVisible)
 
@@ -3290,6 +3306,56 @@ fun VideoPlayerScreen(
         }
     }
 
+    // --- 자막 오프셋 적용 (SRT 타임스탬프 수정 후 자막 트랙 재로드) ---
+    LaunchedEffect(subtitleOffsetMs) {
+        if (subtitleOffsetMs == 0L) return@LaunchedEffect
+        if (finalSubtitleUrl == null) return@LaunchedEffect
+        
+        val subtitlePath = finalSubtitleUrl!!.removePrefix("file://")
+        val subtitleFile = java.io.File(subtitlePath)
+        if (!subtitleFile.exists()) return@LaunchedEffect
+        
+        val ext = finalSubtitleExt?.lowercase() ?: subtitleFile.extension.lowercase()
+        // SRT 파일만 오프셋 적용 (SMI는 이미 SRT로 변환됨)
+        if (ext != "srt") return@LaunchedEffect
+        
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val originalSrt = subtitleFile.readText(kotlin.text.Charsets.UTF_8)
+                val adjustedSrt = adjustSrtTimestamps(originalSrt, subtitleOffsetMs)
+                val offsetFile = java.io.File(context.cacheDir, "cached_sub_offset_${System.currentTimeMillis()}.srt")
+                offsetFile.writeText(adjustedSrt, kotlin.text.Charsets.UTF_8)
+                
+                val currentPos = exoPlayer.currentPosition
+                val wasPlaying = exoPlayer.isPlaying
+                
+                val newSubUri = android.net.Uri.parse("file://" + offsetFile.absolutePath)
+                val newSubConfig = MediaItem.SubtitleConfiguration.Builder(newSubUri)
+                    .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_SUBRIP)
+                    .setLanguage("ko")
+                    .setSelectionFlags(androidx.media3.common.C.SELECTION_FLAG_DEFAULT or androidx.media3.common.C.SELECTION_FLAG_FORCED)
+                    .setRoleFlags(androidx.media3.common.C.ROLE_FLAG_SUBTITLE)
+                    .setId("jsplayer_external_sub")
+                    .build()
+                
+                val currentMediaItem = exoPlayer.currentMediaItem ?: return@withContext
+                val newMediaItem = currentMediaItem.buildUpon()
+                    .setSubtitleConfigurations(listOf(newSubConfig))
+                    .build()
+                
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    exoPlayer.setMediaItem(newMediaItem)
+                    exoPlayer.prepare()
+                    exoPlayer.seekTo(currentPos)
+                    exoPlayer.playWhenReady = wasPlaying
+                    android.util.Log.d("VideoPlayerScreen", "Subtitle offset applied: ${subtitleOffsetMs}ms")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("VideoPlayerScreen", "Failed to apply subtitle offset", e)
+            }
+        }
+    }
+
     // Props version is used directly to ensure sync on recomposition
     // key(videoUrl) in MainActivity ensures fresh state on video change
 
@@ -3570,16 +3636,26 @@ fun VideoPlayerScreen(
                     },
                     onDoubleTap = { offset ->
                         if (currentIsControlVisible) return@detectTapGestures
-                        val screenWidth = size.width
-                        if (offset.x < screenWidth / 2f) {
-                            exoPlayer.seekTo((exoPlayer.currentPosition - doubleClickSeekTime * 1000L).coerceAtLeast(0L))
-                            seekIndicatorText = "-${doubleClickSeekTime}초"
-                            showSeekIndicator = true
+                        if (zoomScale > 1.01f) {
+                            // 줌 상태 → 1x로 리셋
+                            zoomScale = 1f
+                            zoomOffsetX = 0f
+                            zoomOffsetY = 0f
+                            zoomIndicatorText = "1.0x"
+                            showZoomIndicator = true
                         } else {
-                            val duration = exoPlayer.duration.coerceAtLeast(0L)
-                            exoPlayer.seekTo((exoPlayer.currentPosition + doubleClickSeekTime * 1000L).coerceAtMost(duration))
-                            seekIndicatorText = "+${doubleClickSeekTime}초"
-                            showSeekIndicator = true
+                            // 기존 더블탭 탐색 동작 유지
+                            val screenWidth = size.width
+                            if (offset.x < screenWidth / 2f) {
+                                exoPlayer.seekTo((exoPlayer.currentPosition - doubleClickSeekTime * 1000L).coerceAtLeast(0L))
+                                seekIndicatorText = "-${doubleClickSeekTime}초"
+                                showSeekIndicator = true
+                            } else {
+                                val duration = exoPlayer.duration.coerceAtLeast(0L)
+                                exoPlayer.seekTo((exoPlayer.currentPosition + doubleClickSeekTime * 1000L).coerceAtMost(duration))
+                                seekIndicatorText = "+${doubleClickSeekTime}초"
+                                showSeekIndicator = true
+                            }
                         }
                     }
                 )
@@ -3587,7 +3663,7 @@ fun VideoPlayerScreen(
             .pointerInput(Unit) {
                 detectHorizontalDragGestures(
                     onDragStart = { _ ->
-                        if (currentIsControlVisible) return@detectHorizontalDragGestures
+                        if (currentIsControlVisible || zoomScale > 1.01f) return@detectHorizontalDragGestures
                         isDraggingScreen = true
                         screenDragPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
                         showSeekIndicator = true
@@ -3614,7 +3690,7 @@ fun VideoPlayerScreen(
             .pointerInput(Unit) {
                 detectVerticalDragGestures(
                     onDragStart = { offset ->
-                        if (currentIsControlVisible) return@detectVerticalDragGestures
+                        if (currentIsControlVisible || zoomScale > 1.01f) return@detectVerticalDragGestures
                         val screenWidth = size.width
                         if (offset.x > screenWidth * 0.6f) { // 오른쪽 40% 영역: 밝기
                             isDraggingBrightness = true
@@ -3679,6 +3755,63 @@ fun VideoPlayerScreen(
                         }
                     }
                 )
+            }
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val pointers = event.changes.filter { it.pressed }
+                        
+                        // 2손가락 이상일 때만 핀치줌 처리
+                        if (pointers.size >= 2) {
+                            val p1 = pointers[0]
+                            val p2 = pointers[1]
+                            
+                            val prevDist = kotlin.math.sqrt(
+                                (p1.previousPosition.x - p2.previousPosition.x).let { it * it } +
+                                (p1.previousPosition.y - p2.previousPosition.y).let { it * it }
+                            )
+                            val currentDist = kotlin.math.sqrt(
+                                (p1.position.x - p2.position.x).let { it * it } +
+                                (p1.position.y - p2.position.y).let { it * it }
+                            )
+                            
+                            if (prevDist > 0f) {
+                                val gestureZoom = currentDist / prevDist
+                                val newScale = (zoomScale * gestureZoom).coerceIn(1f, 4f)
+                                
+                                // 패닝 (두 손가락 중심점 이동)
+                                val prevCenter = androidx.compose.ui.geometry.Offset(
+                                    (p1.previousPosition.x + p2.previousPosition.x) / 2f,
+                                    (p1.previousPosition.y + p2.previousPosition.y) / 2f
+                                )
+                                val currentCenter = androidx.compose.ui.geometry.Offset(
+                                    (p1.position.x + p2.position.x) / 2f,
+                                    (p1.position.y + p2.position.y) / 2f
+                                )
+                                val pan = currentCenter - prevCenter
+                                
+                                zoomScale = newScale
+                                
+                                if (zoomScale > 1.01f) {
+                                    val maxOffsetX = (size.width * (zoomScale - 1f)) / 2f
+                                    val maxOffsetY = (size.height * (zoomScale - 1f)) / 2f
+                                    zoomOffsetX = (zoomOffsetX + pan.x).coerceIn(-maxOffsetX, maxOffsetX)
+                                    zoomOffsetY = (zoomOffsetY + pan.y).coerceIn(-maxOffsetY, maxOffsetY)
+                                } else {
+                                    zoomOffsetX = 0f
+                                    zoomOffsetY = 0f
+                                }
+                                
+                                zoomIndicatorText = "${String.format("%.1f", zoomScale)}x"
+                                showZoomIndicator = true
+                            }
+                            
+                            // 2손가락일 때 이벤트 소비하여 다른 제스처 방지
+                            pointers.forEach { it.consume() }
+                        }
+                    }
+                }
             }
             .onKeyEvent { event ->
                 if (event.type == KeyEventType.KeyDown) {
@@ -3844,8 +3977,41 @@ fun VideoPlayerScreen(
                     androidx.media3.ui.SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * subtitleScale
                 )
             },
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = zoomScale
+                    scaleY = zoomScale
+                    translationX = zoomOffsetX
+                    translationY = zoomOffsetY
+                }
         )
+
+        // --- Zoom Indicator (상단 중앙) ---
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showZoomIndicator,
+            enter = androidx.compose.animation.fadeIn(tween(200)),
+            exit = androidx.compose.animation.fadeOut(tween(400)),
+            modifier = Modifier
+                .align(androidx.compose.ui.Alignment.TopCenter)
+                .padding(top = 60.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .background(
+                        Color.Black.copy(alpha = 0.65f),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp)
+                    )
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = "🔍 $zoomIndicatorText",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
 
         // --- TV Control Overlay (bottom) ---
         val showOverlay = isControlVisible && (mainActivity?.isInPipMode?.value != true)
@@ -5299,6 +5465,9 @@ fun convertSmiToSrt(smiText: String): String {
     val srt = StringBuilder()
     var counter = 1
     
+    // KRCC 클래스가 있는지 확인 (멀티 클래스 SMI 파일 처리)
+    val hasKrcc = smiText.contains("KRCC", ignoreCase = true)
+    
     val parts = smiText.split(Regex("(?i)<SYNC"))
     var currentStart = -1L
     var currentText = ""
@@ -5311,11 +5480,24 @@ fun convertSmiToSrt(smiText: String): String {
             val timeMs = startMatch.groupValues[1].toLong()
             
             val textStart = part.indexOf('>')
-            val rawText = if (textStart != -1) part.substring(textStart + 1) else ""
+            var rawText = if (textStart != -1) part.substring(textStart + 1) else ""
             
-            var cleanText = rawText.replace(Regex("(?i)<br\\s*/?>"), "\n")
+            // 멀티 클래스 SMI: KRCC 클래스의 텍스트만 추출
+            if (hasKrcc) {
+                val krccMatch = Regex("(?i)<P[^>]*Class\\s*=\\s*[\"']?KRCC[\"']?[^>]*>(.*?)(?=<P[^>]*Class|$)", RegexOption.DOT_MATCHES_ALL).find(rawText)
+                rawText = krccMatch?.groupValues?.get(1) ?: rawText
+            }
+            
+            var cleanText = rawText.replace(Regex("(?i)<br[^>]*>"), "\n")
             cleanText = cleanText.replace(Regex("<[^>]+>"), "")
+            // HTML 엔티티 처리 (다양한 공백 변형 포함)
             cleanText = cleanText.replace("&nbsp;", " ")
+            cleanText = cleanText.replace("&#160;", " ")
+            cleanText = cleanText.replace("\u00A0", " ")  // non-breaking space
+            cleanText = cleanText.replace("&amp;", "&")
+            cleanText = cleanText.replace("&lt;", "<")
+            cleanText = cleanText.replace("&gt;", ">")
+            cleanText = cleanText.replace("&quot;", "\"")
             cleanText = cleanText.replace("\r\n", "\n").replace(Regex("\n{2,}"), "\n")
             cleanText = cleanText.trim()
             
@@ -5345,6 +5527,24 @@ fun formatSrtTime(ms: Long): String {
     val s = (ms % 60000) / 1000
     val msRem = ms % 1000
     return String.format(java.util.Locale.US, "%02d:%02d:%02d,%03d", h, m, s, msRem)
+}
+
+/**
+ * SRT 자막의 모든 타임스탬프에 오프셋을 적용합니다.
+ * @param srtText 원본 SRT 텍스트
+ * @param offsetMs 오프셋(ms). 양수=자막 늦게, 음수=자막 빨리
+ */
+fun adjustSrtTimestamps(srtText: String, offsetMs: Long): String {
+    if (offsetMs == 0L) return srtText
+    val timePattern = Regex("(\\d{2}):(\\d{2}):(\\d{2}),(\\d{3})")
+    return timePattern.replace(srtText) { match ->
+        val h = match.groupValues[1].toLong()
+        val m = match.groupValues[2].toLong()
+        val s = match.groupValues[3].toLong()
+        val ms = match.groupValues[4].toLong()
+        val totalMs = (h * 3600000 + m * 60000 + s * 1000 + ms + offsetMs).coerceAtLeast(0L)
+        formatSrtTime(totalMs)
+    }
 }
 
 fun java.io.InputStream.readBytesWithLimit(limit: Int = 10 * 1024 * 1024): ByteArray {
