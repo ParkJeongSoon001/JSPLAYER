@@ -11,8 +11,8 @@ android {
         applicationId = "com.sv21c.jsplayer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 126
-        versionName = "1.2.6"
+        versionCode = 127
+        versionName = "1.2.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
