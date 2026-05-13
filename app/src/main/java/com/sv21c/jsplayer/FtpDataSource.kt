@@ -36,6 +36,8 @@ class FtpDataSource(
 
     override fun open(dataSpec: DataSpec): Long {
         Log.d(TAG, "open() called: uri=${dataSpec.uri}, position=${dataSpec.position}, length=${dataSpec.length}, encoding=$encoding")
+        // 이전 연결이 남아있으면 정리
+        close()
         try {
             uri = dataSpec.uri
             transferInitializing(dataSpec)
@@ -66,6 +68,8 @@ class FtpDataSource(
             }
             ftpClient.connectTimeout = 15000
             ftpClient.defaultTimeout = 15000
+            ftpClient.dataTimeout = java.time.Duration.ofMillis(30000)  // 데이터 소켓 타임아웃
+            ftpClient.setBufferSize(1024 * 1024)  // 데이터 전송 버퍼 크기
 
             // ── 인코딩 설정 (connect() 전에 해야 함) ──
             when (encoding) {
@@ -89,12 +93,13 @@ class FtpDataSource(
                 ftpClient.execPROT("P")
             }
             ftpClient.enterLocalPassiveMode()
+            Log.d(TAG, "Passive mode - data connection: ${ftpClient.passiveHost}:${ftpClient.passivePort}")
             ftpClient.setFileType(FTP.BINARY_FILE_TYPE)
 
             // 파일 크기 조회
-            val fileSize = ftpClient.getSize(remotePath)
-            val totalSize = if (fileSize != null) {
-                fileSize.toLong()
+            val fileSize: Long? = ftpClient.queryFileSize(remotePath)
+            val totalSize: Long = if (fileSize != null) {
+                fileSize
             } else {
                 // SIZE 명령이 지원되지 않는 경우
                 C.LENGTH_UNSET.toLong()
@@ -130,6 +135,8 @@ class FtpDataSource(
                 }
                 retryClient.connectTimeout = 15000
                 retryClient.defaultTimeout = 15000
+                retryClient.dataTimeout = java.time.Duration.ofMillis(30000)
+                retryClient.setBufferSize(1024 * 1024)
                 retryClient.controlEncoding = "EUC-KR"
                 retryClient.connect(host, port)
                 if (!retryClient.login(username, password)) {
@@ -141,7 +148,12 @@ class FtpDataSource(
                     retryClient.execPROT("P")
                 }
                 retryClient.enterLocalPassiveMode()
+                Log.d(TAG, "Passive mode (EUC-KR retry) - data connection: ${retryClient.passiveHost}:${retryClient.passivePort}")
                 retryClient.setFileType(FTP.BINARY_FILE_TYPE)
+
+                // EUC-KR 재접속 시 파일 크기 조회 (데이터 스트림 열기 전에 수행해야 함)
+                val retrySizeVal: Long? = retryClient.queryFileSize(remotePath)
+                val retryTotalSize: Long = retrySizeVal ?: C.LENGTH_UNSET.toLong()
 
                 if (dataSpec.position > 0) {
                     retryClient.restartOffset = dataSpec.position
@@ -158,9 +170,6 @@ class FtpDataSource(
                 inputStream = java.io.BufferedInputStream(stream, 1024 * 1024)
                 client = retryClient
 
-                // EUC-KR 재접속 시 파일 크기 재조회
-                val retrySizeVal = retryClient.getSize(remotePath)
-                val retryTotalSize = retrySizeVal?.toLong() ?: C.LENGTH_UNSET.toLong()
                 bytesToRead = if (dataSpec.length == C.LENGTH_UNSET.toLong()) {
                     if (retryTotalSize != C.LENGTH_UNSET.toLong()) {
                         retryTotalSize - dataSpec.position
@@ -252,19 +261,24 @@ class FtpDataSource(
     }
 
     /**
-     * FTPClient.getSize() - SIZE 명령으로 파일 크기 조회
+     * 파일 크기 조회 - Apache Commons Net 내장 getSize(String): String 활용
+     * SIZE 명령을 서버에 보내고 응답 문자열을 Long으로 파싱
      * 지원하지 않는 서버의 경우 null 반환
      */
-    private fun FTPClient.getSize(remotePath: String): Long? {
+    private fun FTPClient.queryFileSize(remotePath: String): Long? {
         return try {
-            sendCommand("SIZE", remotePath)
-            val reply = replyCode
-            if (reply == 213) {
-                replyString.trim().substringAfterLast(" ").toLongOrNull()
+            val sizeStr: String? = getSize(remotePath)
+            if (sizeStr != null) {
+                // 응답 예: "213 123456789" 또는 "123456789"
+                val size = sizeStr.trim().substringAfterLast(" ").toLongOrNull()
+                Log.d(TAG, "queryFileSize() via SIZE: $size (raw: $sizeStr)")
+                size
             } else {
+                Log.w(TAG, "queryFileSize() SIZE returned null for: $remotePath")
                 null
             }
         } catch (e: Exception) {
+            Log.w(TAG, "queryFileSize() exception: ${e.message}")
             null
         }
     }

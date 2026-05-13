@@ -3052,12 +3052,22 @@ fun VideoPlayerScreen(
     }
 
     // --- ExoPlayer ---
-    val exoPlayer = remember {
+    // FFmpeg 디코딩 에러 시 기본 디코더로 폴백하기 위한 상태
+    var ffmpegFallbackRetry by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    var savedPositionForRetry by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
+
+    val exoPlayer = remember(ffmpegFallbackRetry) {
         val passthroughEnabled = SettingsStore.getAudioPassthroughEnabled(context)
-        val extensionMode = if (passthroughEnabled) {
-            DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
-        } else {
-            DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+        val extensionMode = when {
+            // FFmpeg 오디오 디코딩 실패 후 재시도: 플랫폼 디코더 우선 (FFmpeg 비디오는 유지)
+            ffmpegFallbackRetry > 0 -> {
+                android.util.Log.w("ExoPlayer_Debug", "🔄 FFmpeg 폴백 재시도 #$ffmpegFallbackRetry → 플랫폼 디코더 우선 (FFmpeg 비디오 유지)")
+                DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+            }
+            // 패스스루 모드: 확장 렌더러 허용 (플랫폼 우선)
+            passthroughEnabled -> DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+            // 기본: FFmpeg 우선 (DTS/DivX/Xvid 등 다양한 코덱 지원)
+            else -> DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
         }
         val renderersFactory = DefaultRenderersFactory(context)
             .setExtensionRendererMode(extensionMode)
@@ -3103,12 +3113,14 @@ fun VideoPlayerScreen(
                     }
                 }
                 private val ftpDataSource by lazy { FtpDataSource(ftpEncoding) }
+                private val ftpUnseekableDataSource by lazy { UnseekableDataSource(FtpDataSource(ftpEncoding)) }
                 private val sftpDataSource by lazy { SftpDataSource() }
 
                 override fun addTransferListener(transferListener: androidx.media3.datasource.TransferListener) {
                     defaultDataSource.addTransferListener(transferListener)
                     smbDataSource.addTransferListener(transferListener)
                     ftpDataSource.addTransferListener(transferListener)
+                    ftpUnseekableDataSource.addTransferListener(transferListener)
                     sftpDataSource.addTransferListener(transferListener)
                 }
 
@@ -3116,7 +3128,14 @@ fun VideoPlayerScreen(
                     val scheme = dataSpec.uri.scheme?.lowercase()
                     activeDataSource = when (scheme) {
                         "smb" -> smbDataSource
-                        "ftp", "ftps" -> ftpDataSource
+                        "ftp", "ftps" -> {
+                            val pathLower = dataSpec.uri.path?.lowercase()
+                            if (pathLower?.endsWith(".avi") == true || pathLower?.endsWith(".mkv") == true) {
+                                ftpUnseekableDataSource
+                            } else {
+                                ftpDataSource
+                            }
+                        }
                         "sftp" -> sftpDataSource
                         else -> defaultDataSource
                     }
@@ -3269,6 +3288,15 @@ fun VideoPlayerScreen(
 
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                         android.util.Log.e("ExoPlayer_Debug", "❌ Player Error: ${error.message}", error)
+                        
+                        // FFmpeg 디코딩 에러 감지 → 기본 디코더로 자동 재시도
+                        if (ffmpegFallbackRetry == 0 && 
+                            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED &&
+                            error.message?.contains("Ffmpeg", ignoreCase = true) == true) {
+                            android.util.Log.w("ExoPlayer_Debug", "🔄 FFmpeg 디코딩 실패 감지 → 기본 디코더로 폴백 재시도")
+                            savedPositionForRetry = currentPosition.coerceAtLeast(0L)
+                            ffmpegFallbackRetry++
+                        }
                     }
                 })
 
@@ -3286,11 +3314,16 @@ fun VideoPlayerScreen(
                 playWhenReady = true
                 PlayHistoryStore.markPlayed(context, videoUrl)
                 
-                // 저장된 재생 위치로 이동
-                val savedPosition = PlaybackPositionStore.getPosition(context, videoUrl)
-                if (savedPosition > 0L) {
-                    seekTo(savedPosition)
-                    android.util.Log.d("VideoPlayerScreen", "Restored playback position: ${savedPosition}ms")
+                // 저장된 재생 위치로 이동 (FFmpeg 폴백 재시도 시 에러 시점 위치 우선)
+                val resumePosition = if (ffmpegFallbackRetry > 0 && savedPositionForRetry > 0L) {
+                    android.util.Log.d("VideoPlayerScreen", "FFmpeg 폴백 재시도: ${savedPositionForRetry}ms 위치로 복원")
+                    savedPositionForRetry
+                } else {
+                    PlaybackPositionStore.getPosition(context, videoUrl)
+                }
+                if (resumePosition > 0L) {
+                    seekTo(resumePosition)
+                    android.util.Log.d("VideoPlayerScreen", "Restored playback position: ${resumePosition}ms")
                 }
             }
     }
@@ -3398,6 +3431,9 @@ fun VideoPlayerScreen(
             PlayerSingleton.mediaSession?.release()
             PlayerSingleton.mediaSession = null
             PlayerSingleton.player = null
+            // FFmpeg 폴백으로 플레이어가 재생성될 때 이전 인스턴스 정리
+            exoPlayer.release()
+            android.util.Log.d("VideoPlayerScreen", "Previous ExoPlayer instance released")
         }
     }
 
@@ -3976,6 +4012,11 @@ fun VideoPlayerScreen(
                 playerView.subtitleView?.setFractionalTextSize(
                     androidx.media3.ui.SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * subtitleScale
                 )
+                
+                val showOverlay = isControlVisible && (mainActivity?.isInPipMode?.value != true)
+                playerView.subtitleView?.setBottomPaddingFraction(
+                    if (showOverlay) 0.40f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION
+                )
             },
             modifier = Modifier
                 .fillMaxSize()
@@ -4013,8 +4054,30 @@ fun VideoPlayerScreen(
             }
         }
 
-        // --- TV Control Overlay (bottom) ---
         val showOverlay = isControlVisible && (mainActivity?.isInPipMode?.value != true)
+
+        // --- Title Overlay (Top Center) ---
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showOverlay,
+            enter = androidx.compose.animation.fadeIn(tween(250)) + androidx.compose.animation.slideInVertically(tween(300)) { -it },
+            exit = androidx.compose.animation.fadeOut(tween(250)) + androidx.compose.animation.slideOutVertically(tween(300)) { -it },
+            modifier = Modifier.align(androidx.compose.ui.Alignment.TopCenter).padding(top = 16.dp)
+        ) {
+            Text(
+                text = title,
+                color = Color.White,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.5f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+        }
+
+        // --- TV Control Overlay (bottom) ---
         androidx.compose.animation.AnimatedVisibility(
             visible = showOverlay,
             enter = androidx.compose.animation.fadeIn(tween(250)),
@@ -4033,17 +4096,6 @@ fun VideoPlayerScreen(
                     )
                     .padding(start = 72.dp, end = 72.dp, top = 20.dp, bottom = if (isPortrait) 56.dp else 8.dp)
             ) {
-                // Title
-                Text(
-                    text = title,
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(bottom = 10.dp)
-                )
-
                 // Progress Slider (Interactive)
                 if (showProgressBar) {
                     Slider(

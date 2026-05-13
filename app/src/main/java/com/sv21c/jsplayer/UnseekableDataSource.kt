@@ -20,7 +20,12 @@ class UnseekableDataSource(private val upstream: DataSource) : DataSource {
         upstream.addTransferListener(transferListener)
     }
 
+    private var bytesReadTotal: Long = 0L
+    private var isAviFormat: Boolean = false
+
     override fun open(dataSpec: DataSpec): Long {
+        bytesReadTotal = 0L
+        isAviFormat = false
         // Range 요청을 하더라도 upstream에 그대로 전달하되,
         // 반환되는 길이는 무조건 UNSET으로 속입니다.
         upstream.open(dataSpec)
@@ -28,7 +33,43 @@ class UnseekableDataSource(private val upstream: DataSource) : DataSource {
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-        return upstream.read(buffer, offset, length)
+        val bytesRead = upstream.read(buffer, offset, length)
+        if (bytesRead > 0) {
+            // 첫 번째 읽기에서 실제 파일 포맷이 AVI(RIFF 헤더)인지 확인합니다.
+            // (확장자만 .avi이고 실제론 MKV 등인 경우를 필터링하기 위함)
+            if (bytesReadTotal == 0L && bytesRead >= 4) {
+                if (buffer[offset] == 'R'.code.toByte() &&
+                    buffer[offset + 1] == 'I'.code.toByte() &&
+                    buffer[offset + 2] == 'F'.code.toByte() &&
+                    buffer[offset + 3] == 'F'.code.toByte()
+                ) {
+                    isAviFormat = true
+                }
+            }
+
+            // 진짜 AVI 파일의 초반부(헤더 영역)일 때만 'avih' 청크 탐색 및 변조 수행
+            if (isAviFormat && bytesReadTotal < 8192L) {
+                for (i in offset until offset + bytesRead - 20) {
+                    if (buffer[i] == 'a'.code.toByte() &&
+                        buffer[i + 1] == 'v'.code.toByte() &&
+                        buffer[i + 2] == 'i'.code.toByte() &&
+                        buffer[i + 3] == 'h'.code.toByte()
+                    ) {
+                        // avih 청크 발견! dwFlags는 'avih' 문자열로부터 20바이트 뒤에 위치 (Little Endian)
+                        // AVIF_HASINDEX = 0x00000010
+                        val flagOffset = i + 20
+                        val oldByte = buffer[flagOffset].toInt()
+                        if ((oldByte and 0x10) == 0x10) {
+                            buffer[flagOffset] = (oldByte and 0xEF).toByte()
+                            android.util.Log.d("UnseekableDataSource", "Spoofed AVIF_HASINDEX flag at offset ${bytesReadTotal + i - offset}")
+                        }
+                        break // avih 청크는 하나만 존재함
+                    }
+                }
+            }
+            bytesReadTotal += bytesRead
+        }
+        return bytesRead
     }
 
     override fun getUri(): Uri? {
