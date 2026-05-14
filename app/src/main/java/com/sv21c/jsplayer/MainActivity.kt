@@ -3072,6 +3072,55 @@ fun VideoPlayerScreen(
         val renderersFactory = DefaultRenderersFactory(context)
             .setExtensionRendererMode(extensionMode)
             
+        val forceHwDecoder = SettingsStore.getForceHwDecoder(context)
+        renderersFactory.setMediaCodecSelector(object : androidx.media3.exoplayer.mediacodec.MediaCodecSelector {
+            override fun getDecoderInfos(
+                mimeType: String,
+                requiresSecureDecoder: Boolean,
+                requiresTunnelingDecoder: Boolean
+            ): MutableList<androidx.media3.exoplayer.mediacodec.MediaCodecInfo> {
+                val defaultInfos = androidx.media3.exoplayer.mediacodec.MediaCodecSelector.DEFAULT.getDecoderInfos(
+                    mimeType,
+                    requiresSecureDecoder,
+                    requiresTunnelingDecoder
+                )
+                if (defaultInfos.isEmpty()) return defaultInfos
+                
+                val hwDecoders = mutableListOf<androidx.media3.exoplayer.mediacodec.MediaCodecInfo>()
+                val swDecoders = mutableListOf<androidx.media3.exoplayer.mediacodec.MediaCodecInfo>()
+                
+                for (info in defaultInfos) {
+                    if (info.hardwareAccelerated) {
+                        hwDecoders.add(info)
+                    } else {
+                        swDecoders.add(info)
+                    }
+                }
+                
+                val sortedInfos = mutableListOf<androidx.media3.exoplayer.mediacodec.MediaCodecInfo>()
+                
+                // 구형 코덱(DivX, Xvid 등)은 하드웨어 디코더(c2.sec.mpeg4.decoder 등)에서 
+                // Error 0xe 등 크래시를 유발하는 경우가 많으므로 무조건 소프트웨어 디코더를 우선합니다.
+                if (mimeType.equals("video/mp4v-es", ignoreCase = true)) {
+                    android.util.Log.d("ExoPlayer_Debug", "⚙️ video/mp4v-es (DivX/Xvid) 감지 -> 소프트웨어 디코더 강제 우선")
+                    sortedInfos.addAll(swDecoders)
+                    sortedInfos.addAll(hwDecoders)
+                } else if (forceHwDecoder) {
+                    sortedInfos.addAll(hwDecoders)
+                    sortedInfos.addAll(swDecoders)
+                } else {
+                    // 기본 동작 유지
+                    return defaultInfos
+                }
+                
+                return sortedInfos
+            }
+        })
+        
+        if (forceHwDecoder) {
+            android.util.Log.d("ExoPlayer_Debug", "⚙️ 강제 하드웨어 디코더 우선순위 적용됨 (video/mp4v-es 제외)")
+        }
+
         var finalVideoUrl = videoUrl
         val finalHeaders = httpHeaders.toMutableMap()
         val httpDataSourceFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
@@ -3159,7 +3208,19 @@ fun VideoPlayerScreen(
             }
         }
 
-        val mediaSourceFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context)
+        val customExtractorsFactory = androidx.media3.extractor.ExtractorsFactory {
+            val defaultExtractors = androidx.media3.extractor.DefaultExtractorsFactory().createExtractors()
+            defaultExtractors.map { extractor ->
+                if (extractor.javaClass.name == "androidx.media3.extractor.avi.AviExtractor") {
+                    android.util.Log.i("ExoPlayer_Debug", "Using Custom AviExtractor for legacy codec support (DIV3/XVID)")
+                    com.sv21c.jsplayer.avi.AviExtractor()
+                } else {
+                    extractor
+                }
+            }.toTypedArray()
+        }
+
+        val mediaSourceFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context, customExtractorsFactory)
             .setDataSourceFactory(customDataSourceFactory)
 
         // 외부 파일 탐색기(Solid Explorer 등)의 로컬 프록시 URL 감지
@@ -3251,7 +3312,6 @@ fun VideoPlayerScreen(
                 }
                 prepare()
                 
-                // --- 디버깅 로그 추가 ---
                 addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
                     override fun onAudioDecoderInitialized(
                         eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
@@ -3260,6 +3320,15 @@ fun VideoPlayerScreen(
                         initializationDurationMs: Long
                     ) {
                         android.util.Log.i("ExoPlayer_Debug", "✅ Audio Decoder Initialized: $decoderName")
+                    }
+
+                    override fun onVideoDecoderInitialized(
+                        eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                        decoderName: String,
+                        initializedTimestampMs: Long,
+                        initializationDurationMs: Long
+                    ) {
+                        android.util.Log.i("ExoPlayer_Debug", "✅ Video Decoder Initialized: $decoderName")
                     }
                 })
 
@@ -3981,9 +4050,16 @@ fun VideoPlayerScreen(
             }
     ) {
         // --- Video surface ---
+        val useTextureView = remember { SettingsStore.getUseTextureView(context) }
         AndroidView(
             factory = { ctx ->
-                androidx.media3.ui.PlayerView(ctx).apply {
+                val playerView = if (useTextureView) {
+                    android.view.LayoutInflater.from(ctx).inflate(R.layout.player_view_texture, null) as androidx.media3.ui.PlayerView
+                } else {
+                    androidx.media3.ui.PlayerView(ctx)
+                }
+                
+                playerView.apply {
                     player = exoPlayer
                     useController = false // Use custom TV controller
                     keepScreenOn = true // 재생 중 화면 꺼짐 방지
@@ -6852,7 +6928,7 @@ fun HomeScreen(
 
                 Spacer(Modifier.height(20.dp))
 
-                // 안내 및 라이선스 정책 버튼
+                // 안내 및 설정 버튼 1열
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Center,
@@ -6888,17 +6964,17 @@ fun HomeScreen(
                                 color = if (isCodecFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
                                 shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
                             ),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Text(
                             text = "[추가 코덱 설치 안내]",
                             color = if (isCodecFocused) Color.White else Color(0xFF94A3B8),
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MaterialTheme.typography.labelMedium,
                             fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
                         )
                     }
 
-                    Spacer(modifier = Modifier.width(2.dp))
+                    Spacer(modifier = Modifier.width(16.dp))
 
                     var isSettingsFocused by remember { mutableStateOf(false) }
                     TextButton(
@@ -6916,40 +6992,12 @@ fun HomeScreen(
                                 color = if (isSettingsFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
                                 shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
                             ),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            text = "[오디오 설정]",
+                            text = "[비디오,오디오 HW설정]",
                             color = if (isSettingsFocused) Color.White else Color(0xFF94A3B8),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(2.dp))
-
-                    var isLicenseFocused by remember { mutableStateOf(false) }
-                    TextButton(
-                        onClick = onLicenseClick,
-                        modifier = Modifier
-                            .onFocusChanged { isLicenseFocused = it.isFocused }
-                            .focusable()
-                            .onKeyEvent { event ->
-                                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
-                                    onLicenseClick()
-                                    true
-                                } else false
-                            }
-                            .background(
-                                color = if (isLicenseFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
-                                shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
-                            ),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
-                    ) {
-                        Text(
-                            text = "[오픈소스 라이선스 정책]",
-                            color = if (isLicenseFocused) Color.White else Color(0xFF94A3B8),
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MaterialTheme.typography.labelMedium,
                             fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
                         )
                     }
@@ -6957,6 +7005,7 @@ fun HomeScreen(
 
                 Spacer(Modifier.height(8.dp))
 
+                // 안내 및 설정 버튼 2열
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Center,
@@ -6986,12 +7035,40 @@ fun HomeScreen(
                                 color = if (isListViewSettingsFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
                                 shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
                             ),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Text(
                             text = "[파일리스트 보기 설정]",
                             color = if (isListViewSettingsFocused) Color.White else Color(0xFF94A3B8),
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(16.dp))
+
+                    var isLicenseFocused by remember { mutableStateOf(false) }
+                    TextButton(
+                        onClick = onLicenseClick,
+                        modifier = Modifier
+                            .onFocusChanged { isLicenseFocused = it.isFocused }
+                            .focusable()
+                            .onKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                    onLicenseClick()
+                                    true
+                                } else false
+                            }
+                            .background(
+                                color = if (isLicenseFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
+                                shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                            ),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "[오픈라이센스 정책]",
+                            color = if (isLicenseFocused) Color.White else Color(0xFF94A3B8),
+                            style = MaterialTheme.typography.labelMedium,
                             fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
                         )
                     }
@@ -7155,6 +7232,8 @@ fun PassthroughSettingsScreen(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var isPassthroughEnabled by remember { mutableStateOf(SettingsStore.getAudioPassthroughEnabled(context)) }
+    var isForceHwDecoderEnabled by remember { mutableStateOf(SettingsStore.getForceHwDecoder(context)) }
+    var isUseTextureViewEnabled by remember { mutableStateOf(SettingsStore.getUseTextureView(context)) }
     
     // UI elements
     Box(
@@ -7194,7 +7273,7 @@ fun PassthroughSettingsScreen(
                     )
                 }
                 Text(
-                    text = "오디오 패스스루 설정",
+                    text = "비디오/오디오 고급 설정",
                     style = MaterialTheme.typography.titleLarge,
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
@@ -7259,6 +7338,144 @@ fun PassthroughSettingsScreen(
                         onCheckedChange = { newVal ->
                             isPassthroughEnabled = newVal
                             SettingsStore.saveAudioPassthroughEnabled(context, newVal)
+                        },
+                        modifier = Modifier.padding(start = 16.dp),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Color(0xFF8B5CF6),
+                            uncheckedThumbColor = Color(0xFF94A3B8),
+                            uncheckedTrackColor = Color(0xFF334155)
+                        )
+                    )
+                }
+            }
+            
+            // Setting Item: Force HW Decoder
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = if (isTvMode) 32.dp else 16.dp)
+                    .padding(top = 16.dp)
+                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                    .background(Color.White.copy(alpha = 0.05f))
+                    .border(
+                        width = 1.dp,
+                        color = Color.White.copy(alpha = 0.1f),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+                    )
+            ) {
+                var isHwRowFocused by remember { mutableStateOf(false) }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { isHwRowFocused = it.isFocused }
+                        .focusable()
+                        .onKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                val newVal = !isForceHwDecoderEnabled
+                                isForceHwDecoderEnabled = newVal
+                                SettingsStore.saveForceHwDecoder(context, newVal)
+                                true
+                            } else false
+                        }
+                        .clickable {
+                            val newVal = !isForceHwDecoderEnabled
+                            isForceHwDecoderEnabled = newVal
+                            SettingsStore.saveForceHwDecoder(context, newVal)
+                        }
+                        .background(if (isHwRowFocused) Color.White.copy(alpha = 0.15f) else Color.Transparent)
+                        .padding(20.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "하드웨어 비디오 디코더 강제 사용",
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "기본값은 OFF입니다. x265(HEVC) 등 고화질 영상 재생 시 기기의 내장 하드웨어 디코더를 강제로 우선 시도합니다. 영상이 버벅일 때 켜보세요.",
+                            color = Color.White.copy(alpha = 0.6f),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Switch(
+                        checked = isForceHwDecoderEnabled,
+                        onCheckedChange = { newVal ->
+                            isForceHwDecoderEnabled = newVal
+                            SettingsStore.saveForceHwDecoder(context, newVal)
+                        },
+                        modifier = Modifier.padding(start = 16.dp),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Color(0xFF8B5CF6),
+                            uncheckedThumbColor = Color(0xFF94A3B8),
+                            uncheckedTrackColor = Color(0xFF334155)
+                        )
+                    )
+                }
+            }
+
+            // Setting Item: Use TextureView
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = if (isTvMode) 32.dp else 16.dp)
+                    .padding(top = 16.dp)
+                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                    .background(Color.White.copy(alpha = 0.05f))
+                    .border(
+                        width = 1.dp,
+                        color = Color.White.copy(alpha = 0.1f),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+                    )
+            ) {
+                var isTexRowFocused by remember { mutableStateOf(false) }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { isTexRowFocused = it.isFocused }
+                        .focusable()
+                        .onKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
+                                val newVal = !isUseTextureViewEnabled
+                                isUseTextureViewEnabled = newVal
+                                SettingsStore.saveUseTextureView(context, newVal)
+                                true
+                            } else false
+                        }
+                        .clickable {
+                            val newVal = !isUseTextureViewEnabled
+                            isUseTextureViewEnabled = newVal
+                            SettingsStore.saveUseTextureView(context, newVal)
+                        }
+                        .background(if (isTexRowFocused) Color.White.copy(alpha = 0.15f) else Color.Transparent)
+                        .padding(20.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "렌더링 뷰 호환 모드 (TextureView 사용)",
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "기본값(SurfaceView) 재생 시 10-bit MP4 등 특정 영상이 깨지거나 버벅인다면 이 옵션을 켜서 TextureView 렌더링 방식으로 변경해보세요.",
+                            color = Color.White.copy(alpha = 0.6f),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Switch(
+                        checked = isUseTextureViewEnabled,
+                        onCheckedChange = { newVal ->
+                            isUseTextureViewEnabled = newVal
+                            SettingsStore.saveUseTextureView(context, newVal)
                         },
                         modifier = Modifier.padding(start = 16.dp),
                         colors = SwitchDefaults.colors(

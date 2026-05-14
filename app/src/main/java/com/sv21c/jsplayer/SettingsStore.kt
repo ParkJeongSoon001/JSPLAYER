@@ -118,4 +118,20 @@ object SettingsStore {
     fun saveShowListFileInfo(context: Context, show: Boolean) {
         getPrefs(context).edit().putBoolean("show_list_file_info", show).apply()
     }
+
+    fun getForceHwDecoder(context: Context): Boolean {
+        return getPrefs(context).getBoolean("force_hw_decoder", false)
+    }
+
+    fun saveForceHwDecoder(context: Context, force: Boolean) {
+        getPrefs(context).edit().putBoolean("force_hw_decoder", force).apply()
+    }
+
+    fun getUseTextureView(context: Context): Boolean {
+        return getPrefs(context).getBoolean("use_texture_view", false)
+    }
+
+    fun saveUseTextureView(context: Context, use: Boolean) {
+        getPrefs(context).edit().putBoolean("use_texture_view", use).apply()
+    }
 }
