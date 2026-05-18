@@ -2916,8 +2916,9 @@ fun VideoPlayerScreen(
     var zoomOffsetY by remember { mutableFloatStateOf(0f) }
     var showZoomIndicator by remember { mutableStateOf(false) }
     var zoomIndicatorText by remember { mutableStateOf("1.0x") }
+    var zoomIndicatorTrigger by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(showZoomIndicator) {
+    LaunchedEffect(zoomIndicatorTrigger) {
         if (showZoomIndicator) {
             delay(1200L)
             showZoomIndicator = false
@@ -3748,6 +3749,7 @@ fun VideoPlayerScreen(
                             zoomOffsetY = 0f
                             zoomIndicatorText = "1.0x"
                             showZoomIndicator = true
+                            zoomIndicatorTrigger++
                         } else {
                             // 기존 더블탭 탐색 동작 유지
                             val screenWidth = size.width
@@ -3910,6 +3912,7 @@ fun VideoPlayerScreen(
                                 
                                 zoomIndicatorText = "${String.format("%.1f", zoomScale)}x"
                                 showZoomIndicator = true
+                                zoomIndicatorTrigger++
                             }
                             
                             // 2손가락일 때 이벤트 소비하여 다른 제스처 방지
