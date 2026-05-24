@@ -2837,7 +2837,7 @@ fun VideoPlayerScreen(
     var currentPosition by remember { mutableLongStateOf(0L) }
     var totalDuration by remember { mutableLongStateOf(1L) }
     var isPlaying by remember { mutableStateOf(true) }
-    var currentSpeed by remember { mutableFloatStateOf(1.0f) }
+    var currentSpeed by remember { mutableFloatStateOf(SettingsStore.getPlaybackSpeed(context)) }
     var subtitleOffsetMs by remember { mutableLongStateOf(0L) }
     var hideTimerKey by remember { mutableIntStateOf(0) }
     var isOrientationLocked by remember { mutableStateOf(true) }
@@ -3383,6 +3383,7 @@ fun VideoPlayerScreen(
 
                 playWhenReady = true
                 PlayHistoryStore.markPlayed(context, videoUrl)
+                setPlaybackSpeed(currentSpeed)
                 
                 // 저장된 재생 위치로 이동 (FFmpeg 폴백 재시도 시 에러 시점 위치 우선)
                 val resumePosition = if (ffmpegFallbackRetry > 0 && savedPositionForRetry > 0L) {
@@ -3396,6 +3397,11 @@ fun VideoPlayerScreen(
                     android.util.Log.d("VideoPlayerScreen", "Restored playback position: ${resumePosition}ms")
                 }
             }
+    }
+
+    // 재생 속도 변경 시 저장
+    LaunchedEffect(currentSpeed) {
+        SettingsStore.savePlaybackSpeed(context, currentSpeed)
     }
 
     // ── 캐스팅 시 ExoPlayer 일시정지 / 캐스팅 종료 시 재개 ──

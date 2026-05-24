@@ -134,4 +134,12 @@ object SettingsStore {
     fun saveUseTextureView(context: Context, use: Boolean) {
         getPrefs(context).edit().putBoolean("use_texture_view", use).apply()
     }
+
+    fun getPlaybackSpeed(context: Context): Float {
+        return getPrefs(context).getFloat("playback_speed", 1.0f)
+    }
+
+    fun savePlaybackSpeed(context: Context, speed: Float) {
+        getPrefs(context).edit().putFloat("playback_speed", speed).apply()
+    }
 }
