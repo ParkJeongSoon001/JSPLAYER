@@ -59,7 +59,7 @@ class SftpDataSource : BaseDataSource(/* isNetwork = */ true) {
             val userInfo = parsedUri.userInfo
             val username = userInfo?.substringBefore(":") ?: throw IOException("SFTP username is required")
             val password = userInfo.substringAfter(":", "") ?: ""
-            val remotePath = parsedUri.path ?: throw IOException("SFTP path is null")
+            val remotePath = android.net.Uri.decode(parsedUri.path ?: throw IOException("SFTP path is null"))
 
             val ssh = SSHClient(net.schmizz.sshj.AndroidConfig())
             ssh.addHostKeyVerifier(PromiscuousVerifier())
@@ -77,7 +77,8 @@ class SftpDataSource : BaseDataSource(/* isNetwork = */ true) {
             sshClient = ssh
             sftpClient = sftp
             remoteFile = file
-            inputStream = file.ReadAheadRemoteFileInputStream(16, currentOffset)
+            val rawStream = file.RemoteFileInputStream(currentOffset)
+            inputStream = java.io.BufferedInputStream(rawStream, BUFFER_SIZE)
 
             bytesToRead = if (dataSpec.length == C.LENGTH_UNSET.toLong()) {
                 fileSize - dataSpec.position

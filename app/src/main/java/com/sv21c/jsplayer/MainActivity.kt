@@ -43,6 +43,7 @@ import androidx.compose.ui.draw.paint
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.em
 import com.sv21c.jsplayer.R
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
@@ -293,6 +294,21 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         // 추가 코덱 동적 로딩 초기화 (Media3 구성 요소 로드 전 최우선 실행)
         FfmpegLoader.initialize(this)
+        
+        // 디바이스 내 사용 가능한 모든 MPEG-4 관련 디코더 목록 로깅 (디버그용)
+        try {
+            val list = android.media.MediaCodecList(android.media.MediaCodecList.ALL_CODECS)
+            for (info in list.codecInfos) {
+                if (!info.isEncoder) {
+                    val supported = info.supportedTypes.filter { it.contains("mp4v", ignoreCase = true) || it.contains("mpeg4", ignoreCase = true) }
+                    if (supported.isNotEmpty()) {
+                        android.util.Log.w("ExoPlayer_Debug", "📱 Found MPEG4 decoder: ${info.name} (HW:${info.isHardwareAccelerated}, SWOnly:${info.isSoftwareOnly}, Types:$supported)")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("ExoPlayer_Debug", "Error logging codecs", e)
+        }
         
         super.onCreate(savedInstanceState)
 
@@ -2934,15 +2950,18 @@ fun VideoPlayerScreen(
     var isSubReady by remember { mutableStateOf(false) }
     
     LaunchedEffect(subtitleUrl, videoUrl) {
-        if (subtitleUrl != null) {
-            android.util.Log.d("AutoPlay", "VideoPlayerScreen: Processing subtitle: $subtitleUrl (ext=$subtitleExtension)")
+        isSubReady = false
+        try {
+            kotlinx.coroutines.withTimeoutOrNull(10000L) {
+                if (subtitleUrl != null) {
+                    android.util.Log.d("AutoPlay", "VideoPlayerScreen: Processing subtitle: $subtitleUrl (ext=$subtitleExtension)")
             if (subtitleUrl.startsWith("file://") && subtitleUrl.contains("cached_sub")) {
                 finalSubtitleUrl = subtitleUrl
                 finalSubtitleExt = subtitleExtension
                 android.util.Log.d("AutoPlay", "VideoPlayerScreen: Using cached subtitle: $finalSubtitleUrl")
                 isSubReady = true
             } else {
-                val (url, ext) = downloadAndProcessSubtitle(context, subtitleUrl, httpHeaders = httpHeaders, providedExtension = subtitleExtension)
+                val (url, ext) = downloadAndProcessSubtitle(context, subtitleUrl, ftpEncoding = ftpEncoding, httpHeaders = httpHeaders, providedExtension = subtitleExtension)
                 if (url != null) {
                     finalSubtitleUrl = url
                     finalSubtitleExt = ext
@@ -3005,44 +3024,178 @@ fun VideoPlayerScreen(
                     }
                 }
             } else {
-                // 네트워크 URL → 기존 확장자 기반 프로빙
-                val lastSlashIndex = videoUrl.lastIndexOf('/')
-                val lastDotIndex = videoUrl.lastIndexOf('.')
-                if (lastDotIndex > lastSlashIndex && lastDotIndex > 0 && videoUrl.length - lastDotIndex <= 5) {
-                    val baseUrl = videoUrl.substring(0, lastDotIndex)
-                    var probeFound = false
-                    for (probeExt in listOf("ass", "ssa", "srt", "smi", "vtt", "sub", "txt")) {
-                        val probeUrl = "$baseUrl.$probeExt"
-                        android.util.Log.d("AutoPlay", "VideoPlayerScreen: Probing subtitle: $probeUrl")
+                // 네트워크 URL → 기존 확장자 기반 프로빙 개선 (디렉토리 리스팅 1회 사용)
+                val scheme = parsedUri.scheme?.lowercase() ?: ""
+                if (scheme == "ftp" || scheme == "ftps" || scheme == "sftp" || scheme == "smb") {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                         try {
-                            val (url, ext) = downloadAndProcessSubtitle(context, probeUrl, ftpEncoding, httpHeaders, probeExt)
-                            if (url != null) {
-                                finalSubtitleUrl = url
-                                finalSubtitleExt = ext
-                                android.util.Log.d("AutoPlay", "VideoPlayerScreen: Probe found subtitle: $finalSubtitleUrl (ext=$finalSubtitleExt)")
-                                probeFound = true
-                                break
+                            val lastSlash = videoUrl.lastIndexOf('/')
+                            if (lastSlash > 0) {
+                                val parentPathUrl = videoUrl.substring(0, lastSlash + 1)
+                                val videoFullName = videoUrl.substring(lastSlash + 1)
+                                val lastDot = videoFullName.lastIndexOf('.')
+                                val baseName = if (lastDot > 0) videoFullName.substring(0, lastDot) else videoFullName
+                                
+                                val userInfo = parsedUri.userInfo
+                                val username = userInfo?.substringBefore(":") ?: ""
+                                val password = userInfo?.substringAfter(":") ?: ""
+                                val host = parsedUri.host ?: ""
+                                val port = parsedUri.port
+                                val isFtps = scheme == "ftps"
+                                
+                                val subExtensions = listOf("ass", "ssa", "srt", "smi", "vtt", "sub", "txt")
+                                var matchedFileName: String? = null
+                                var matchedFileUrl: String? = null
+                                var matchedExt: String? = null
+                                
+                                if (scheme == "ftp" || scheme == "ftps") {
+                                    val decodedParentPath = android.net.Uri.decode(parsedUri.path ?: "")
+                                    val lastSlashDecoded = decodedParentPath.lastIndexOf('/')
+                                    val parentDirPath = if (lastSlashDecoded >= 0) decodedParentPath.substring(0, lastSlashDecoded + 1) else "/"
+                                    
+                                    val listResult = FtpManager.listFiles(
+                                        host = host,
+                                        port = if (port > 0) port else 21,
+                                        username = username,
+                                        password = password,
+                                        remotePath = parentDirPath,
+                                        encoding = ftpEncoding,
+                                        isFtps = isFtps
+                                    )
+                                    
+                                    listResult.getOrNull()?.let { items ->
+                                        for (ext in subExtensions) {
+                                            val targetName = "$baseName.$ext"
+                                            val found = items.find { it.name.equals(targetName, ignoreCase = true) }
+                                            if (found != null) {
+                                                matchedFileName = found.name
+                                                matchedFileUrl = parentPathUrl + android.net.Uri.encode(found.name)
+                                                matchedExt = ext
+                                                break
+                                            }
+                                        }
+                                    }
+                                } else if (scheme == "sftp") {
+                                    val decodedParentPath = android.net.Uri.decode(parsedUri.path ?: "")
+                                    val lastSlashDecoded = decodedParentPath.lastIndexOf('/')
+                                    val parentDirPath = if (lastSlashDecoded >= 0) decodedParentPath.substring(0, lastSlashDecoded + 1) else "/"
+                                    
+                                    val listResult = SftpManager.listFiles(
+                                        host = host,
+                                        port = if (port > 0) port else 22,
+                                        username = username,
+                                        password = password,
+                                        remotePath = parentDirPath
+                                    )
+                                    
+                                    listResult.getOrNull()?.let { items ->
+                                        for (ext in subExtensions) {
+                                            val targetName = "$baseName.$ext"
+                                            val found = items.find { it.name.equals(targetName, ignoreCase = true) }
+                                            if (found != null) {
+                                                matchedFileName = found.name
+                                                matchedFileUrl = parentPathUrl + android.net.Uri.encode(found.name)
+                                                matchedExt = ext
+                                                break
+                                            }
+                                        }
+                                    }
+                                } else if (scheme == "smb") {
+                                    val listResult = SmbManager.listFiles(
+                                        smbUrl = parentPathUrl,
+                                        username = username,
+                                        password = password
+                                    )
+                                    
+                                    listResult.getOrNull()?.let { items ->
+                                        for (ext in subExtensions) {
+                                            val targetName = "$baseName.$ext"
+                                            val found = items.find { it.name.equals(targetName, ignoreCase = true) }
+                                            if (found != null) {
+                                                matchedFileName = found.name
+                                                matchedFileUrl = found.path
+                                                matchedExt = ext
+                                                break
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                if (matchedFileUrl != null && matchedExt != null) {
+                                    android.util.Log.d("AutoPlay", "VideoPlayerScreen: Subtitle matched via Directory list: $matchedFileUrl")
+                                    val (url, ext) = downloadAndProcessSubtitle(context, matchedFileUrl!!, ftpEncoding, httpHeaders, matchedExt)
+                                    if (url != null) {
+                                        finalSubtitleUrl = url
+                                        finalSubtitleExt = ext
+                                    }
+                                } else {
+                                    android.util.Log.d("AutoPlay", "VideoPlayerScreen: No matching subtitle found in remote directory")
+                                }
                             }
                         } catch (e: Throwable) {
-                            android.util.Log.d("AutoPlay", "VideoPlayerScreen: Probe failed for $probeUrl: ${e.message}")
+                            android.util.Log.e("AutoPlay", "VideoPlayerScreen: Error during directory-based subtitle probing", e)
                         }
                     }
-                    if (!probeFound) {
-                        android.util.Log.d("AutoPlay", "VideoPlayerScreen: No subtitle found from probing")
+                } else {
+                    // HTTP 등의 프로토콜은 기존의 단일 파일 프로빙 기법 유지
+                    val lastSlashIndex = videoUrl.lastIndexOf('/')
+                    val lastDotIndex = videoUrl.lastIndexOf('.')
+                    if (lastDotIndex > lastSlashIndex && lastDotIndex > 0 && videoUrl.length - lastDotIndex <= 5) {
+                        val baseUrl = videoUrl.substring(0, lastDotIndex)
+                        var probeFound = false
+                        for (probeExt in listOf("ass", "ssa", "srt", "smi", "vtt", "sub", "txt")) {
+                            val probeUrl = "$baseUrl.$probeExt"
+                            android.util.Log.d("AutoPlay", "VideoPlayerScreen: Probing subtitle: $probeUrl")
+                            try {
+                                val (url, ext) = downloadAndProcessSubtitle(context, probeUrl, ftpEncoding, httpHeaders, probeExt)
+                                if (url != null) {
+                                    finalSubtitleUrl = url
+                                    finalSubtitleExt = ext
+                                    android.util.Log.d("AutoPlay", "VideoPlayerScreen: Probe found subtitle: $finalSubtitleUrl (ext=$finalSubtitleExt)")
+                                    probeFound = true
+                                    break
+                                }
+                            } catch (e: Throwable) {
+                                android.util.Log.d("AutoPlay", "VideoPlayerScreen: Probe failed for $probeUrl: ${e.message}")
+                            }
+                        }
+                        if (!probeFound) {
+                            android.util.Log.d("AutoPlay", "VideoPlayerScreen: No subtitle found from probing")
+                        }
                     }
                 }
             }
+        }
+    } ?: android.util.Log.w("AutoPlay", "VideoPlayerScreen: Subtitle processing timed out (2s limit)")
+        } catch (e: Throwable) {
+            android.util.Log.e("AutoPlay", "VideoPlayerScreen: Error processing subtitle", e)
+        } finally {
             isSubReady = true
         }
     }
 
-    if (!isSubReady) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
-            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+    // --- ExoPlayer Retry States ---
+    var ffmpegFallbackRetry by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    var savedPositionForRetry by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
+    // 실패한 비디오 디코더 블랙리스트 — 재시도 시 다른 디코더 선택을 강제
+    var failedVideoDecoders by remember { androidx.compose.runtime.mutableStateOf(setOf<String>()) }
+    var lastVideoDecoderName by remember { androidx.compose.runtime.mutableStateOf("") }
+    // VLC 폴백 상태 — 모든 Android 디코더 실패 시 VLC LibVLC로 전환
+    var useVlcFallback by remember { androidx.compose.runtime.mutableStateOf(false) }
+    val vlcPlayer = remember {
+        VlcPlayerWrapper(context).apply {
+            onError = { msg ->
+                (context as? android.app.Activity)?.runOnUiThread {
+                    android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_LONG).show()
+                }
+                onClose()
+            }
         }
-        return
-    }    // --- Track Selector ---
-    val trackSelector = remember {
+    }
+
+
+    // --- Track Selector ---
+    val trackSelector = remember(ffmpegFallbackRetry) {
         val selector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context)
         selector.setParameters(
             selector.buildUponParameters()
@@ -3052,26 +3205,71 @@ fun VideoPlayerScreen(
         selector
     }
 
-    // --- ExoPlayer ---
-    // FFmpeg 디코딩 에러 시 기본 디코더로 폴백하기 위한 상태
-    var ffmpegFallbackRetry by remember { androidx.compose.runtime.mutableIntStateOf(0) }
-    var savedPositionForRetry by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
-
     val exoPlayer = remember(ffmpegFallbackRetry) {
         val passthroughEnabled = SettingsStore.getAudioPassthroughEnabled(context)
         val extensionMode = when {
-            // FFmpeg 오디오 디코딩 실패 후 재시도: 플랫폼 디코더 우선 (FFmpeg 비디오는 유지)
-            ffmpegFallbackRetry > 0 -> {
-                android.util.Log.w("ExoPlayer_Debug", "🔄 FFmpeg 폴백 재시도 #$ffmpegFallbackRetry → 플랫폼 디코더 우선 (FFmpeg 비디오 유지)")
+            // ★ FFmpeg 비디오 디코더가 APK에 번들되었으므로 항상 PREFER 사용
+            // ExperimentalFfmpegVideoRenderer가 video/mp4v-es(DivX/Xvid), wmv, vp6 등 처리
+            ffmpegFallbackRetry == 0 -> {
+                android.util.Log.i("ExoPlayer_Debug", "🎬 FFmpeg 비디오 렌더러 우선 모드 (PREFER) — DivX/Xvid 기본 지원")
+                DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+            }
+            // 1차 재시도: PREFER 유지 + 블랙리스트 적용
+            ffmpegFallbackRetry == 1 -> {
+                android.util.Log.w("ExoPlayer_Debug", "🔄 FFmpeg 폴백 재시도 #1 → PREFER + 블랙리스트: $failedVideoDecoders")
+                DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+            }
+            // 2차+ 재시도: ON 모드 + 블랙리스트
+            ffmpegFallbackRetry >= 2 -> {
+                android.util.Log.w("ExoPlayer_Debug", "🔄 FFmpeg 폴백 재시도 #$ffmpegFallbackRetry → ON 모드 + 블랙리스트: $failedVideoDecoders")
                 DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
             }
-            // 패스스루 모드: 확장 렌더러 허용 (플랫폼 우선)
-            passthroughEnabled -> DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
-            // 기본: FFmpeg 우선 (DTS/DivX/Xvid 등 다양한 코덱 지원)
             else -> DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
         }
-        val renderersFactory = DefaultRenderersFactory(context)
+        // ★ DefaultRenderersFactory 서브클래싱:
+        //   buildVideoRenderers() 오버라이드로 ExperimentalFfmpegVideoRenderer를 맨 앞에 삽입
+        //   → video/mp4v-es (DivX/Xvid) 재생 시 FFmpeg이 우선 처리
+        val renderersFactory = object : DefaultRenderersFactory(context) {
+            override fun buildVideoRenderers(
+                context: android.content.Context,
+                extensionRendererMode: Int,
+                mediaCodecSelector: androidx.media3.exoplayer.mediacodec.MediaCodecSelector,
+                enableDecoderFallback: Boolean,
+                eventHandler: android.os.Handler,
+                eventListener: androidx.media3.exoplayer.video.VideoRendererEventListener,
+                allowedVideoJoiningTimeMs: Long,
+                out: ArrayList<androidx.media3.exoplayer.Renderer>
+            ) {
+                // 1) LegacyFfmpegVideoRenderer를 먼저 추가
+                //    video/mp4v-es(DivX/Xvid) 등 레거시 MIME에 대해 ffmpegHasDecoder 직접 확인
+                try {
+                    val ffmpegVideoRenderer = LegacyFfmpegVideoRenderer(
+                        allowedVideoJoiningTimeMs,
+                        eventHandler,
+                        eventListener,
+                        MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY
+                    )
+                    out.add(ffmpegVideoRenderer)
+                    android.util.Log.i("ExoPlayer_Debug",
+                        "🎬 LegacyFfmpegVideoRenderer 등록 완료 (index=${out.size - 1}) — video/mp4v-es 지원")
+                } catch (e: Exception) {
+                    android.util.Log.e("ExoPlayer_Debug",
+                        "❌ LegacyFfmpegVideoRenderer 생성 실패: ${e.message}")
+                }
+                // 2) 이후 기본 MediaCodec 비디오 렌더러 추가 (폴백용)
+                super.buildVideoRenderers(
+                    context, extensionRendererMode, mediaCodecSelector,
+                    enableDecoderFallback, eventHandler, eventListener,
+                    allowedVideoJoiningTimeMs, out
+                )
+            }
+        }
             .setExtensionRendererMode(extensionMode)
+            .setEnableDecoderFallback(true)
+        
+
+        // 현재 블랙리스트된 디코더 목록 캡처 (remember 블록 내부에서 사용)
+        val currentBlacklist = failedVideoDecoders
             
         val forceHwDecoder = SettingsStore.getForceHwDecoder(context)
         renderersFactory.setMediaCodecSelector(object : androidx.media3.exoplayer.mediacodec.MediaCodecSelector {
@@ -3087,10 +3285,24 @@ fun VideoPlayerScreen(
                 )
                 if (defaultInfos.isEmpty()) return defaultInfos
                 
+                // ★ 이전에 크래시한 디코더를 블랙리스트에서 제거
+                val availableInfos = if (currentBlacklist.isNotEmpty()) {
+                    val filtered = defaultInfos.filter { it.name !in currentBlacklist }
+                    if (filtered.isNotEmpty()) {
+                        android.util.Log.w("ExoPlayer_Debug", "🚫 블랙리스트 디코더 제외: $currentBlacklist → 남은 디코더: ${filtered.map { it.name }}")
+                        filtered.toMutableList()
+                    } else {
+                        android.util.Log.w("ExoPlayer_Debug", "⚠️ 모든 디코더가 블랙리스트됨 → 기본 목록 사용 (최후 시도)")
+                        defaultInfos
+                    }
+                } else {
+                    defaultInfos
+                }
+                
                 val hwDecoders = mutableListOf<androidx.media3.exoplayer.mediacodec.MediaCodecInfo>()
                 val swDecoders = mutableListOf<androidx.media3.exoplayer.mediacodec.MediaCodecInfo>()
                 
-                for (info in defaultInfos) {
+                for (info in availableInfos) {
                     if (info.hardwareAccelerated) {
                         hwDecoders.add(info)
                     } else {
@@ -3100,10 +3312,14 @@ fun VideoPlayerScreen(
                 
                 val sortedInfos = mutableListOf<androidx.media3.exoplayer.mediacodec.MediaCodecInfo>()
                 
-                // 구형 코덱(DivX, Xvid 등)은 하드웨어 디코더(c2.sec.mpeg4.decoder 등)에서 
-                // Error 0xe 등 크래시를 유발하는 경우가 많으므로 무조건 소프트웨어 디코더를 우선합니다.
-                if (mimeType.equals("video/mp4v-es", ignoreCase = true)) {
-                    android.util.Log.d("ExoPlayer_Debug", "⚙️ video/mp4v-es (DivX/Xvid) 감지 -> 소프트웨어 디코더 강제 우선")
+                // 레거시 MPEG-4 계열 코덱: 불안정한 HW 디코더 대신 Google SW 디코더 강제 우선
+                val isLegacyMpeg4 = mimeType.equals("video/mp4v-es", ignoreCase = true) ||
+                    mimeType.equals("video/mp42", ignoreCase = true) ||
+                    mimeType.equals("video/mp43", ignoreCase = true)
+                
+                if (isLegacyMpeg4) {
+                    android.util.Log.w("ExoPlayer_Debug", "🔄 $mimeType (레거시 MPEG-4) MediaCodecSelector: 소프트웨어 디코더 강제 우선 적용 (FFmpeg/MediaCodec 폴백 호환)")
+                    // 하드웨어 디코더의 크래시를 방지하기 위해 소프트웨어 디코더를 무조건 우선시합니다.
                     sortedInfos.addAll(swDecoders)
                     sortedInfos.addAll(hwDecoders)
                 } else if (forceHwDecoder) {
@@ -3178,14 +3394,7 @@ fun VideoPlayerScreen(
                     val scheme = dataSpec.uri.scheme?.lowercase()
                     activeDataSource = when (scheme) {
                         "smb" -> smbDataSource
-                        "ftp", "ftps" -> {
-                            val pathLower = dataSpec.uri.path?.lowercase()
-                            if (pathLower?.endsWith(".avi") == true || pathLower?.endsWith(".mkv") == true) {
-                                ftpUnseekableDataSource
-                            } else {
-                                ftpDataSource
-                            }
-                        }
+                        "ftp", "ftps" -> ftpDataSource
                         "sftp" -> sftpDataSource
                         else -> defaultDataSource
                     }
@@ -3211,14 +3420,15 @@ fun VideoPlayerScreen(
 
         val customExtractorsFactory = androidx.media3.extractor.ExtractorsFactory {
             val defaultExtractors = androidx.media3.extractor.DefaultExtractorsFactory().createExtractors()
-            defaultExtractors.map { extractor ->
-                if (extractor.javaClass.name == "androidx.media3.extractor.avi.AviExtractor") {
-                    android.util.Log.i("ExoPlayer_Debug", "Using Custom AviExtractor for legacy codec support (DIV3/XVID)")
-                    com.sv21c.jsplayer.avi.AviExtractor()
-                } else {
-                    extractor
+            val list = mutableListOf<androidx.media3.extractor.Extractor>()
+            list.add(com.sv21c.jsplayer.avi.AviExtractor())
+            for (extractor in defaultExtractors) {
+                if (extractor.javaClass.name != "androidx.media3.extractor.avi.AviExtractor") {
+                    list.add(extractor)
                 }
-            }.toTypedArray()
+            }
+            android.util.Log.i("ExoPlayer_Debug", "Using Custom AviExtractor at index 0 for legacy codec support (DIV3/XVID)")
+            list.toTypedArray()
         }
 
         val mediaSourceFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context, customExtractorsFactory)
@@ -3243,76 +3453,16 @@ fun VideoPlayerScreen(
                 if (isLocalProxyUrl) 5000 else 2500,      // bufferForPlaybackMs
                 if (isLocalProxyUrl) 10000 else 5000      // bufferForPlaybackAfterRebufferMs
             )
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .setTargetBufferBytes(64 * 1024 * 1024) // 디코더 스톨 시 무한 로딩 OOM 방지
             .build()
+
 
         ExoPlayer.Builder(context, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setTrackSelector(trackSelector)
             .setLoadControl(loadControl)
             .build().apply {
-                val mediaMetadata = androidx.media3.common.MediaMetadata.Builder()
-                    .setTitle(title)
-                    .build()
-                val mediaItemBuilder = MediaItem.Builder()
-                    .setUri(finalVideoUrl)
-                    .setMediaMetadata(mediaMetadata)
-                if (finalSubtitleUrl != null) {
-                    val isSmi = finalSubtitleExt?.equals("smi", ignoreCase = true) == true || finalSubtitleUrl!!.lowercase().endsWith(".smi")
-                    val isVtt = finalSubtitleExt?.equals("vtt", ignoreCase = true) == true || finalSubtitleUrl!!.lowercase().endsWith(".vtt")
-                    val isAss = finalSubtitleExt?.equals("ass", ignoreCase = true) == true || finalSubtitleUrl!!.lowercase().endsWith(".ass")
-                    val mimeType = when {
-                        isSmi -> "application/x-sami"
-                        isVtt -> androidx.media3.common.MimeTypes.TEXT_VTT
-                        isAss -> androidx.media3.common.MimeTypes.TEXT_SSA
-                        else -> androidx.media3.common.MimeTypes.APPLICATION_SUBRIP
-                    }
-                    android.util.Log.d("VideoPlayerScreen", "Loading subtitle: $finalSubtitleUrl MimeType: $mimeType")
-                    val uri = if (finalSubtitleUrl!!.startsWith("http") || 
-                        finalSubtitleUrl!!.startsWith("file://") || 
-                        finalSubtitleUrl!!.startsWith("sftp://") || 
-                        finalSubtitleUrl!!.startsWith("ftp://") || 
-                        finalSubtitleUrl!!.startsWith("smb://")) {
-                        android.net.Uri.parse(finalSubtitleUrl)
-                    } else {
-                        android.net.Uri.fromFile(java.io.File(finalSubtitleUrl!!))
-                    }
-                    val subtitleConfig = MediaItem.SubtitleConfiguration.Builder(uri)
-                        .setMimeType(mimeType)
-                        .setLanguage("ko")
-                        .setSelectionFlags(androidx.media3.common.C.SELECTION_FLAG_DEFAULT or androidx.media3.common.C.SELECTION_FLAG_FORCED)
-                        .setRoleFlags(androidx.media3.common.C.ROLE_FLAG_SUBTITLE)
-                        .setId("jsplayer_external_sub")
-                        .build()
-                    mediaItemBuilder.setSubtitleConfigurations(listOf(subtitleConfig))
-                }
-                val mediaItem = mediaItemBuilder.build()
-
-                // 프록시 URL인 경우 CacheDataSource + ProgressiveMediaSource
-                if (isLocalProxyUrl) {
-                    // 프록시 서버는 Range 요청을 무시하고 무조건 처음부터 전송하므로,
-                    // MKV 파일 끝의 Index(Cues)를 찾으려고 수 기가바이트를 스킵하는 것을 막기 위해
-                    // 강제로 '길이를 알 수 없는 라이브 스트림'으로 인식시킵니다.
-                    val upstreamFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
-                        .setConnectTimeoutMs(60000)
-                        .setReadTimeoutMs(120000)
-                        .setAllowCrossProtocolRedirects(true)
-                    val unseekableFactory = UnseekableDataSource.Factory(upstreamFactory)
-                    
-                    // Extractor 자체에서도 Seek를 완전히 비활성화합니다.
-                    val extractorsFactory = androidx.media3.extractor.DefaultExtractorsFactory()
-                        .setConstantBitrateSeekingEnabled(false)
-                        .setMatroskaExtractorFlags(androidx.media3.extractor.mkv.MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES)
-                        
-                    val progressiveFactory = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(unseekableFactory, extractorsFactory)
-                        .setContinueLoadingCheckIntervalBytes(256 * 1024)
-                    val mediaSource = progressiveFactory.createMediaSource(mediaItem)
-                    setMediaSource(mediaSource)
-                    android.util.Log.d("VideoPlayerScreen", "[PROXY] CacheDataSource + ProgressiveMediaSource로 재생 시작")
-                } else {
-                    setMediaItem(mediaItem)
-                }
-                prepare()
-                
                 addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
                     override fun onAudioDecoderInitialized(
                         eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
@@ -3330,6 +3480,7 @@ fun VideoPlayerScreen(
                         initializationDurationMs: Long
                     ) {
                         android.util.Log.i("ExoPlayer_Debug", "✅ Video Decoder Initialized: $decoderName")
+                        lastVideoDecoderName = decoderName // 실패 시 블랙리스트에 추가하기 위해 추적
                     }
                 })
 
@@ -3357,15 +3508,29 @@ fun VideoPlayerScreen(
                     }
 
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                        android.util.Log.e("ExoPlayer_Debug", "❌ Player Error: ${error.message}", error)
+                        android.util.Log.e("ExoPlayer_Debug", "❌ Player Error: ${error.message} (code=${error.errorCode})", error)
                         
-                        // FFmpeg 디코딩 에러 감지 → 기본 디코더로 자동 재시도
-                        if (ffmpegFallbackRetry == 0 && 
-                            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED &&
-                            error.message?.contains("Ffmpeg", ignoreCase = true) == true) {
-                            android.util.Log.w("ExoPlayer_Debug", "🔄 FFmpeg 디코딩 실패 감지 → 기본 디코더로 폴백 재시도")
+                        // 디코딩 실패 시 실패 디코더를 블랙리스트에 추가하고 단계적 자동 재시도
+                        // 최대 4회 재시도하여 기기의 모든 사용 가능한 디코더를 순차 시도
+                        if (ffmpegFallbackRetry < 4 && 
+                            (error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED ||
+                             error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED)) {
+                            val nextRetry = ffmpegFallbackRetry + 1
+                            
+                            // 마지막으로 초기화된 디코더를 블랙리스트에 추가
+                            if (lastVideoDecoderName.isNotEmpty()) {
+                                failedVideoDecoders = failedVideoDecoders + lastVideoDecoderName
+                                android.util.Log.w("ExoPlayer_Debug", "🚫 디코더 블랙리스트 추가: $lastVideoDecoderName → 전체 블랙리스트: $failedVideoDecoders")
+                            }
+                            
+                            android.util.Log.w("ExoPlayer_Debug", "🔄 디코딩 실패 감지 → 폴백 재시도 #$nextRetry (블랙리스트: ${failedVideoDecoders.size}개)")
                             savedPositionForRetry = currentPosition.coerceAtLeast(0L)
-                            ffmpegFallbackRetry++
+                            ffmpegFallbackRetry = nextRetry
+                        } else if (ffmpegFallbackRetry >= 4) {
+                            // 모든 디코더 실패 → 사용자에게 FFmpeg 코덱 팩 필요 안내 및 VLC 폴백 전환
+                            android.util.Log.e("ExoPlayer_Debug", "💀 모든 디코더 실패. VLC로 폴백 전환합니다.")
+                            android.util.Log.e("ExoPlayer_Debug", "💀 실패한 디코더 목록: $failedVideoDecoders")
+                            useVlcFallback = true
                         }
                     }
                 })
@@ -3381,27 +3546,139 @@ fun VideoPlayerScreen(
                     android.util.Log.i("ExoPlayer_Debug", "📦 Codec Status: $codecStatus")
                 }
 
-                playWhenReady = true
-                PlayHistoryStore.markPlayed(context, videoUrl)
-                setPlaybackSpeed(currentSpeed)
-                
-                // 저장된 재생 위치로 이동 (FFmpeg 폴백 재시도 시 에러 시점 위치 우선)
-                val resumePosition = if (ffmpegFallbackRetry > 0 && savedPositionForRetry > 0L) {
-                    android.util.Log.d("VideoPlayerScreen", "FFmpeg 폴백 재시도: ${savedPositionForRetry}ms 위치로 복원")
-                    savedPositionForRetry
-                } else {
-                    PlaybackPositionStore.getPosition(context, videoUrl)
-                }
-                if (resumePosition > 0L) {
-                    seekTo(resumePosition)
-                    android.util.Log.d("VideoPlayerScreen", "Restored playback position: ${resumePosition}ms")
-                }
             }
     }
 
-    // 재생 속도 변경 시 저장
+    // --- 비동기 미디어 로딩 및 재생 제어 ---
+    LaunchedEffect(isSubReady, ffmpegFallbackRetry) {
+        if (!isSubReady) return@LaunchedEffect
+
+        // ── AVI 파일 조기 감지 → VLC 즉시 전환 ──────────────────────
+        // AVI+Xvid/DivX는 Android 디코더가 모두 실패하므로 재시도 없이 바로 VLC 사용
+        if (!useVlcFallback && ffmpegFallbackRetry == 0) {
+            val ext = videoUrl.substringAfterLast('.', "").substringBefore('?').lowercase()
+            if (ext in setOf("avi", "divx", "xvid")) {
+                android.util.Log.i("ExoPlayer_Debug",
+                    "📹 AVI 파일 감지 ($ext) → ExoPlayer 건너뛰고 VLC 즉시 사용")
+                useVlcFallback = true
+                return@LaunchedEffect
+            }
+        }
+        // VLC 폴백 활성화 시 ExoPlayer 미디어 로드 건너뛰기
+        if (useVlcFallback) return@LaunchedEffect
+
+        var finalVideoUrl = videoUrl
+        val finalHeaders = httpHeaders.toMutableMap()
+        try {
+            val uri = android.net.Uri.parse(videoUrl)
+            if (uri.scheme?.lowercase()?.startsWith("http") == true) {
+                val userInfo = uri.userInfo
+                val encodedUserInfo = uri.encodedUserInfo
+                if (!userInfo.isNullOrBlank() && !encodedUserInfo.isNullOrBlank()) {
+                    val authHeader = "Basic " + android.util.Base64.encodeToString(userInfo.toByteArray(kotlin.text.Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                    finalHeaders["Authorization"] = authHeader
+                    finalVideoUrl = videoUrl.replaceFirst("://$encodedUserInfo@", "://")
+                    android.util.Log.d("VideoPlayerScreen", "Extracted userInfo from HTTP URL and added Authorization header.")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("VideoPlayerScreen", "Failed to parse UserInfo from URL", e)
+        }
+
+        val isLocalProxyUrl = try {
+            val parsedUri = android.net.Uri.parse(finalVideoUrl)
+            val host = parsedUri.host
+            parsedUri.scheme?.lowercase()?.startsWith("http") == true &&
+                (host == "127.0.0.1" || host == "localhost" || host == "0.0.0.0")
+        } catch (_: Exception) { false }
+
+        if (isLocalProxyUrl) {
+            android.util.Log.d("VideoPlayerScreen", "[PROXY] 로컬 프록시 URL 감지: $finalVideoUrl")
+        }
+
+        val mediaMetadata = androidx.media3.common.MediaMetadata.Builder()
+            .setTitle(title)
+            .build()
+        val mediaItemBuilder = MediaItem.Builder()
+            .setUri(getSafeEncodedUrl(finalVideoUrl))
+            .setMediaMetadata(mediaMetadata)
+        
+        if (finalSubtitleUrl != null) {
+            val isSmi = finalSubtitleExt?.equals("smi", ignoreCase = true) == true || finalSubtitleUrl!!.lowercase().endsWith(".smi")
+            val isVtt = finalSubtitleExt?.equals("vtt", ignoreCase = true) == true || finalSubtitleUrl!!.lowercase().endsWith(".vtt")
+            val isAss = finalSubtitleExt?.equals("ass", ignoreCase = true) == true || finalSubtitleUrl!!.lowercase().endsWith(".ass")
+            val mimeType = when {
+                isSmi -> "application/x-sami"
+                isVtt -> androidx.media3.common.MimeTypes.TEXT_VTT
+                isAss -> androidx.media3.common.MimeTypes.TEXT_SSA
+                else -> androidx.media3.common.MimeTypes.APPLICATION_SUBRIP
+            }
+            android.util.Log.d("VideoPlayerScreen", "Loading subtitle: $finalSubtitleUrl MimeType: $mimeType")
+            val uri = if (finalSubtitleUrl!!.startsWith("http") || 
+                finalSubtitleUrl!!.startsWith("file://") || 
+                finalSubtitleUrl!!.startsWith("sftp://") || 
+                finalSubtitleUrl!!.startsWith("ftp://") || 
+                finalSubtitleUrl!!.startsWith("smb://")) {
+                android.net.Uri.parse(getSafeEncodedUrl(finalSubtitleUrl!!))
+            } else {
+                android.net.Uri.fromFile(java.io.File(finalSubtitleUrl!!))
+            }
+            val subtitleConfig = MediaItem.SubtitleConfiguration.Builder(uri)
+                .setMimeType(mimeType)
+                .setLanguage("ko")
+                .setSelectionFlags(androidx.media3.common.C.SELECTION_FLAG_DEFAULT or androidx.media3.common.C.SELECTION_FLAG_FORCED)
+                .setRoleFlags(androidx.media3.common.C.ROLE_FLAG_SUBTITLE)
+                .setId("jsplayer_external_sub")
+                .build()
+            mediaItemBuilder.setSubtitleConfigurations(listOf(subtitleConfig))
+        }
+        val mediaItem = mediaItemBuilder.build()
+
+        if (isLocalProxyUrl) {
+            val upstreamFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                .setConnectTimeoutMs(60000)
+                .setReadTimeoutMs(120000)
+                .setAllowCrossProtocolRedirects(true)
+            val unseekableFactory = UnseekableDataSource.Factory(upstreamFactory)
+            
+            val extractorsFactory = androidx.media3.extractor.DefaultExtractorsFactory()
+                .setConstantBitrateSeekingEnabled(false)
+                .setMatroskaExtractorFlags(androidx.media3.extractor.mkv.MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES)
+                
+            val progressiveFactory = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(unseekableFactory, extractorsFactory)
+                .setContinueLoadingCheckIntervalBytes(256 * 1024)
+            val mediaSource = progressiveFactory.createMediaSource(mediaItem)
+            exoPlayer.setMediaSource(mediaSource)
+            android.util.Log.d("VideoPlayerScreen", "[PROXY] CacheDataSource + ProgressiveMediaSource로 재생 시작")
+        } else {
+            exoPlayer.setMediaItem(mediaItem)
+        }
+
+        exoPlayer.prepare()
+        exoPlayer.playWhenReady = true
+        PlayHistoryStore.markPlayed(context, videoUrl)
+        exoPlayer.setPlaybackSpeed(currentSpeed)
+
+        val resumePosition = if (ffmpegFallbackRetry > 0 && savedPositionForRetry > 0L) {
+            android.util.Log.d("VideoPlayerScreen", "FFmpeg 폴백 재시도: ${savedPositionForRetry}ms 위치로 복원")
+            savedPositionForRetry
+        } else {
+            PlaybackPositionStore.getPosition(context, videoUrl)
+        }
+        if (resumePosition > 0L) {
+            exoPlayer.seekTo(resumePosition)
+            android.util.Log.d("VideoPlayerScreen", "Restored playback position: ${resumePosition}ms")
+        }
+    }
+
+    // 재생 속도 변경 시 저장 및 동기화
     LaunchedEffect(currentSpeed) {
         SettingsStore.savePlaybackSpeed(context, currentSpeed)
+        try {
+            vlcPlayer.setSpeed(currentSpeed)
+        } catch (e: Exception) {
+            android.util.Log.e("VideoPlayerScreen", "Failed to sync VLC player speed: ${e.message}")
+        }
     }
 
     // ── 캐스팅 시 ExoPlayer 일시정지 / 캐스팅 종료 시 재개 ──
@@ -3632,8 +3909,8 @@ fun VideoPlayerScreen(
 
     DisposableEffect(Unit) { onDispose {
         // 재생 위치 저장 (90% 이상 진행한 경우 삭제)
-        val pos = exoPlayer.currentPosition
-        val dur = exoPlayer.duration
+        val pos = if (useVlcFallback) vlcPlayer.getCurrentPosition() else exoPlayer.currentPosition
+        val dur = if (useVlcFallback) vlcPlayer.getDuration() else exoPlayer.duration
         if (dur > 0 && pos > 0) {
             if (pos.toFloat() / dur.toFloat() > 0.9f) {
                 PlaybackPositionStore.removePosition(context, videoUrl)
@@ -3643,6 +3920,7 @@ fun VideoPlayerScreen(
             }
         }
         exoPlayer.release()
+        vlcPlayer.release()
     } }
 
     // BackHandler는 직접 사용하지 않음.
@@ -3658,11 +3936,19 @@ fun VideoPlayerScreen(
     }
 
     // --- Position update (500ms) ---
-    LaunchedEffect(exoPlayer) {
+    LaunchedEffect(exoPlayer, useVlcFallback) {
         while (true) {
-            currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
-            totalDuration = exoPlayer.duration.coerceAtLeast(1L)
-            isPlaying = exoPlayer.isPlaying
+            if (useVlcFallback) {
+                // VLC 재생 시 VLC에서 위치/재생시간 읽기
+                currentPosition = vlcPlayer.getCurrentPosition().coerceAtLeast(0L)
+                val vlcDur = vlcPlayer.getDuration()
+                if (vlcDur > 0L) totalDuration = vlcDur
+                isPlaying = vlcPlayer.isPlaying()
+            } else {
+                currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
+                totalDuration = exoPlayer.duration.coerceAtLeast(1L)
+                isPlaying = exoPlayer.isPlaying
+            }
             delay(500L)
         }
     }
@@ -3679,9 +3965,28 @@ fun VideoPlayerScreen(
                     return
                 }
             }
-            1 -> exoPlayer.seekTo((exoPlayer.currentPosition - seekTime * 1000L).coerceAtLeast(0L))
-            2 -> if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
-            3 -> exoPlayer.seekTo((exoPlayer.currentPosition + seekTime * 1000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
+            1 -> {
+                if (useVlcFallback) {
+                    vlcPlayer.seekTo((vlcPlayer.getCurrentPosition() - seekTime * 1000L).coerceAtLeast(0L))
+                } else {
+                    exoPlayer.seekTo((exoPlayer.currentPosition - seekTime * 1000L).coerceAtLeast(0L))
+                }
+            }
+            2 -> {
+                if (useVlcFallback) {
+                    if (vlcPlayer.isPlaying()) vlcPlayer.pause() else vlcPlayer.resume()
+                } else {
+                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                }
+            }
+            3 -> {
+                if (useVlcFallback) {
+                    val dur = vlcPlayer.getDuration().coerceAtLeast(0L)
+                    vlcPlayer.seekTo((vlcPlayer.getCurrentPosition() + seekTime * 1000L).coerceAtMost(dur))
+                } else {
+                    exoPlayer.seekTo((exoPlayer.currentPosition + seekTime * 1000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
+                }
+            }
             4 -> { // 다음 동영상
                 if (hasNext) {
                     val nextItem = playlist[currentIndex + 1]
@@ -3693,16 +3998,16 @@ fun VideoPlayerScreen(
             5 -> subtitleScale = maxOf(0.5f, subtitleScale - 0.15f)
             6 -> subtitleScale = minOf(3.0f, subtitleScale + 0.15f)
             7 -> { // 속도 +0.1
-                currentSpeed = (kotlin.math.round((currentSpeed + 0.1f) * 10f) / 10f).coerceIn(0.1f, 2.0f)
-                exoPlayer.setPlaybackSpeed(currentSpeed)
+                currentSpeed = (kotlin.math.round((currentSpeed + 0.1f) * 10f) / 10f).coerceIn(0.1f, 3.0f)
+                if (useVlcFallback) vlcPlayer.setSpeed(currentSpeed) else exoPlayer.setPlaybackSpeed(currentSpeed)
             }
             8 -> { // 속도 초기화 (1.0x)
                 currentSpeed = 1.0f
-                exoPlayer.setPlaybackSpeed(currentSpeed)
+                if (useVlcFallback) vlcPlayer.setSpeed(currentSpeed) else exoPlayer.setPlaybackSpeed(currentSpeed)
             }
             9 -> { // 속도 -0.1
-                currentSpeed = (kotlin.math.round((currentSpeed - 0.1f) * 10f) / 10f).coerceIn(0.1f, 2.0f)
-                exoPlayer.setPlaybackSpeed(currentSpeed)
+                currentSpeed = (kotlin.math.round((currentSpeed - 0.1f) * 10f) / 10f).coerceIn(0.1f, 3.0f)
+                if (useVlcFallback) vlcPlayer.setSpeed(currentSpeed) else exoPlayer.setPlaybackSpeed(currentSpeed)
             }
             10 -> isOrientationLocked = !isOrientationLocked // 회전 잠금/해제 토글
             11 -> { mainActivity?.enterPipMode(); return }
@@ -3734,13 +4039,13 @@ fun VideoPlayerScreen(
                         val released = tryAwaitRelease()
                         if (isLongPressing) {
                             isLongPressing = false
-                            exoPlayer.setPlaybackSpeed(currentSpeed)
+                            if (useVlcFallback) vlcPlayer.setSpeed(currentSpeed) else exoPlayer.setPlaybackSpeed(currentSpeed)
                         }
                     },
                     onLongPress = { offset ->
                         if (currentIsControlVisible) return@detectTapGestures
                         isLongPressing = true
-                        exoPlayer.setPlaybackSpeed(2.0f)
+                        if (useVlcFallback) vlcPlayer.setSpeed(2.0f) else exoPlayer.setPlaybackSpeed(2.0f)
                     },
                     onTap = {
                         onControlVisibilityChange(!currentIsControlVisible)
@@ -3760,12 +4065,16 @@ fun VideoPlayerScreen(
                             // 기존 더블탭 탐색 동작 유지
                             val screenWidth = size.width
                             if (offset.x < screenWidth / 2f) {
-                                exoPlayer.seekTo((exoPlayer.currentPosition - doubleClickSeekTime * 1000L).coerceAtLeast(0L))
+                                val curPos = if (useVlcFallback) vlcPlayer.getCurrentPosition() else exoPlayer.currentPosition
+                                val newPos = (curPos - doubleClickSeekTime * 1000L).coerceAtLeast(0L)
+                                if (useVlcFallback) vlcPlayer.seekTo(newPos) else exoPlayer.seekTo(newPos)
                                 seekIndicatorText = "-${doubleClickSeekTime}초"
                                 showSeekIndicator = true
                             } else {
-                                val duration = exoPlayer.duration.coerceAtLeast(0L)
-                                exoPlayer.seekTo((exoPlayer.currentPosition + doubleClickSeekTime * 1000L).coerceAtMost(duration))
+                                val curPos = if (useVlcFallback) vlcPlayer.getCurrentPosition() else exoPlayer.currentPosition
+                                val duration = if (useVlcFallback) vlcPlayer.getDuration().coerceAtLeast(0L) else exoPlayer.duration.coerceAtLeast(0L)
+                                val newPos = (curPos + doubleClickSeekTime * 1000L).coerceAtMost(duration)
+                                if (useVlcFallback) vlcPlayer.seekTo(newPos) else exoPlayer.seekTo(newPos)
                                 seekIndicatorText = "+${doubleClickSeekTime}초"
                                 showSeekIndicator = true
                             }
@@ -3778,13 +4087,13 @@ fun VideoPlayerScreen(
                     onDragStart = { _ ->
                         if (currentIsControlVisible || zoomScale > 1.01f) return@detectHorizontalDragGestures
                         isDraggingScreen = true
-                        screenDragPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
+                        screenDragPosition = (if (useVlcFallback) vlcPlayer.getCurrentPosition() else exoPlayer.currentPosition).coerceAtLeast(0L)
                         showSeekIndicator = true
                     },
                     onDragEnd = {
                         if (!isDraggingScreen) return@detectHorizontalDragGestures
                         isDraggingScreen = false
-                        exoPlayer.seekTo(screenDragPosition)
+                        if (useVlcFallback) vlcPlayer.seekTo(screenDragPosition) else exoPlayer.seekTo(screenDragPosition)
                     },
                     onDragCancel = {
                         if (!isDraggingScreen) return@detectHorizontalDragGestures
@@ -3793,7 +4102,7 @@ fun VideoPlayerScreen(
                     },
                     onHorizontalDrag = { change: androidx.compose.ui.input.pointer.PointerInputChange, dragAmount: Float ->
                         if (!isDraggingScreen) return@detectHorizontalDragGestures
-                        val duration = exoPlayer.duration.coerceAtLeast(1L)
+                        val duration = (if (useVlcFallback) vlcPlayer.getDuration() else exoPlayer.duration).coerceAtLeast(1L)
                         val deltaMs = (dragAmount * 150).toLong()
                         screenDragPosition = (screenDragPosition + deltaMs).coerceIn(0L, duration)
                         seekIndicatorText = "${formatSrtTime(screenDragPosition).substringBefore(",")} / ${formatSrtTime(duration).substringBefore(",")}"
@@ -4060,6 +4369,17 @@ fun VideoPlayerScreen(
     ) {
         // --- Video surface ---
         val useTextureView = remember { SettingsStore.getUseTextureView(context) }
+
+        if (!isSubReady) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.7f)),
+                contentAlignment = androidx.compose.ui.Alignment.Center
+            ) {
+                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+            }
+        }
         AndroidView(
             factory = { ctx ->
                 val playerView = if (useTextureView) {
@@ -4113,7 +4433,65 @@ fun VideoPlayerScreen(
                 }
         )
 
+        // ── VLC LibVLC 폴백 플레이어 ─────────────────────────────────
+        // AVI+Xvid/DivX 파일은 VLC가 직접 재생
+        // surfaceChanged에서 실제 화면 크기를 받은 후 재생 시작 → 전체 화면 보장
+        if (useVlcFallback) {
+            exoPlayer.pause()
+            LaunchedEffect(videoUrl) {
+                val savedPos = PlaybackPositionStore.getPosition(context, videoUrl)
+                val vlcStartPosition = if (savedPositionForRetry > 0L) savedPositionForRetry else savedPos
+                // URI 준비 (Surface 준비되면 실제 재생 시작) - 한글/공백 안전 인코딩 적용
+                val encodedVideoUrl = getSafeEncodedUrl(videoUrl)
+                vlcPlayer.setSpeed(currentSpeed)
+                vlcPlayer.prepare(android.net.Uri.parse(encodedVideoUrl), vlcStartPosition)
+            }
+
+            LaunchedEffect(finalSubtitleUrl) {
+                // VLC 자체 자막 추가(Freetype 폰트 버그 유발)를 비활성화하고, Compose Subtitle Overlay로 대체 처리합니다.
+                android.util.Log.i("ExoPlayer_Debug", "ℹ️ VLC 자체 자막 로드를 건너뛰고 Compose Subtitle Overlay를 활성화합니다. URL: $finalSubtitleUrl")
+            }
+
+            Box(modifier = Modifier.fillMaxSize()) {
+                AndroidView(
+                    factory = { ctx ->
+                        android.view.SurfaceView(ctx).also { sv ->
+                            sv.holder.addCallback(object : android.view.SurfaceHolder.Callback {
+                                override fun surfaceCreated(h: android.view.SurfaceHolder) {
+                                    android.util.Log.d("ExoPlayer_Debug", "📐 VLC Surface 생성됨")
+                                }
+                                override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, h2: Int) {
+                                    // ★ 핵심: 실제 화면 크기(w, h2)가 확정된 후 재생/크기 업데이트
+                                    android.util.Log.i("ExoPlayer_Debug", "📐 VLC surfaceChanged: ${w}x${h2}")
+                                    vlcPlayer.onSurfaceReady(sv, w, h2)
+                                }
+                                override fun surfaceDestroyed(h: android.view.SurfaceHolder) {
+                                    vlcPlayer.releaseMediaPlayer()
+                                }
+                            })
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                // VLC 재생 시 Compose 기반 자막 오버레이 추가
+                if (!finalSubtitleUrl.isNullOrEmpty()) {
+                    VlcSubtitleOverlay(
+                        subtitleUrl = finalSubtitleUrl!!,
+                        subtitleExt = finalSubtitleExt,
+                        vlcPlayer = vlcPlayer,
+                        subtitleScale = subtitleScale
+                    )
+                }
+            }
+            DisposableEffect(Unit) { onDispose { vlcPlayer.releaseMediaPlayer() } }
+        }
+
+
+
+
         // --- Zoom Indicator (상단 중앙) ---
+
         androidx.compose.animation.AnimatedVisibility(
             visible = showZoomIndicator,
             enter = androidx.compose.animation.fadeIn(tween(200)),
@@ -4191,7 +4569,7 @@ fun VideoPlayerScreen(
                             resetHideTimer()
                         },
                         onValueChangeFinished = {
-                            exoPlayer.seekTo(dragPosition)
+                            if (useVlcFallback) vlcPlayer.seekTo(dragPosition) else exoPlayer.seekTo(dragPosition)
                             isDragging = false
                         },
                         valueRange = 0f..totalDuration.toFloat().coerceAtLeast(1f),
@@ -4465,9 +4843,9 @@ fun VideoPlayerScreen(
                     // ─── 재생속도: 1.0x [－][＋] ───
                     Text("재생속도", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
                     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 9) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { currentSpeed = (kotlin.math.round((currentSpeed - 0.1f) * 10f) / 10f).coerceIn(0.1f, 3.0f); exoPlayer.setPlaybackSpeed(currentSpeed); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 9) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { currentSpeed = (kotlin.math.round((currentSpeed - 0.1f) * 10f) / 10f).coerceIn(0.1f, 3.0f); if (useVlcFallback) vlcPlayer.setSpeed(currentSpeed) else exoPlayer.setPlaybackSpeed(currentSpeed); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
                         Text("${currentSpeed}x", color = if (currentSpeed != 1.0f) Color(0xFFA5D6A7) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.widthIn(min = 32.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 7) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { currentSpeed = (kotlin.math.round((currentSpeed + 0.1f) * 10f) / 10f).coerceIn(0.1f, 3.0f); exoPlayer.setPlaybackSpeed(currentSpeed); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 7) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { currentSpeed = (kotlin.math.round((currentSpeed + 0.1f) * 10f) / 10f).coerceIn(0.1f, 3.0f); if (useVlcFallback) vlcPlayer.setSpeed(currentSpeed) else exoPlayer.setPlaybackSpeed(currentSpeed); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
                     }
                 }
             }
@@ -5462,6 +5840,136 @@ fun buildAudioTrackLabel(format: androidx.media3.common.Format): String {
 }
 
 
+fun getSafeEncodedUrl(url: String): String {
+    try {
+        val schemeIndex = url.indexOf("://")
+        if (schemeIndex == -1) {
+            return url
+        }
+        val scheme = url.substring(0, schemeIndex)
+        val remainder = url.substring(schemeIndex + 3)
+
+        var endOfAuthority = remainder.length
+        for (i in 0 until remainder.length) {
+            val c = remainder[i]
+            if (c == '/' || c == '?' || c == '#') {
+                endOfAuthority = i
+                break
+            }
+        }
+        val authority = remainder.substring(0, endOfAuthority)
+        val rest = remainder.substring(endOfAuthority)
+
+        val atIndex = authority.lastIndexOf('@')
+        val userInfoStr: String
+        val hostPort: String
+        if (atIndex != -1) {
+            val rawUserInfo = authority.substring(0, atIndex)
+            hostPort = authority.substring(atIndex + 1)
+
+            val colonIndex = rawUserInfo.indexOf(':')
+            userInfoStr = if (colonIndex != -1) {
+                val user = rawUserInfo.substring(0, colonIndex)
+                val pass = rawUserInfo.substring(colonIndex + 1)
+                val decUser = android.net.Uri.decode(user)
+                val decPass = android.net.Uri.decode(pass)
+                val encUser = android.net.Uri.encode(decUser)
+                val encPass = android.net.Uri.encode(decPass)
+                "$encUser:$encPass@"
+            } else {
+                val decUser = android.net.Uri.decode(rawUserInfo)
+                val encUser = android.net.Uri.encode(decUser)
+                "$encUser@"
+            }
+        } else {
+            userInfoStr = ""
+            hostPort = authority
+        }
+
+        var path = ""
+        var query = ""
+        var fragment = ""
+
+        var tempRest = rest
+        val hashIndex = tempRest.indexOf('#')
+        if (hashIndex != -1) {
+            fragment = tempRest.substring(hashIndex)
+            tempRest = tempRest.substring(0, hashIndex)
+        }
+
+        val questionIndex = tempRest.indexOf('?')
+        if (questionIndex != -1) {
+            query = tempRest.substring(questionIndex)
+            path = tempRest.substring(0, questionIndex)
+        } else {
+            path = tempRest
+        }
+
+        val encodedPath = if (path.isNotEmpty()) {
+            val decodedPath = android.net.Uri.decode(path)
+            val segments = decodedPath.split("/")
+            segments.joinToString("/") { segment ->
+                android.net.Uri.encode(segment)
+            }
+        } else {
+            ""
+        }
+
+        val encodedQuery = if (query.length > 1) {
+            val queryContent = query.substring(1)
+            "?" + queryContent.split("&").joinToString("&") { pair ->
+                val eqIndex = pair.indexOf('=')
+                if (eqIndex != -1) {
+                    val key = pair.substring(0, eqIndex)
+                    val value = pair.substring(eqIndex + 1)
+                    val decKey = android.net.Uri.decode(key)
+                    val decValue = android.net.Uri.decode(value)
+                    "${android.net.Uri.encode(decKey)}=${android.net.Uri.encode(decValue)}"
+                } else {
+                    val decPair = android.net.Uri.decode(pair)
+                    android.net.Uri.encode(decPair)
+                }
+            }
+        } else {
+            query
+        }
+
+        val encodedFragment = if (fragment.length > 1) {
+            val fragContent = fragment.substring(1)
+            "#" + android.net.Uri.encode(android.net.Uri.decode(fragContent))
+        } else {
+            fragment
+        }
+
+        return "$scheme://$userInfoStr$hostPort$encodedPath$encodedQuery$encodedFragment"
+    } catch (e: Exception) {
+        return url
+    }
+}
+
+fun looksLikeValidKorean(text: String): Boolean {
+    val koreanChars = text.filter { it in '\uAC00'..'\uD7A3' }
+    if (koreanChars.isEmpty()) {
+        return false
+    }
+    
+    val commonKoreanSyllables = setOf(
+        '은', '는', '이', '가', '을', '를', '다', '하', '에', '의', '한', 
+        '기', '고', '있', '없', '것', '지', '되', '어', '도', '면', '게', 
+        '해', '스', '러', '움', '적', '성', '식', '제', '과', '와', '로', '으'
+    )
+    
+    val matchCount = koreanChars.count { it in commonKoreanSyllables }
+    val ratio = matchCount.toFloat() / koreanChars.length
+    
+    android.util.Log.d("SubtitleSearch", "looksLikeValidKorean: koreanCount=${koreanChars.length}, matchCount=$matchCount, ratio=$ratio")
+    return if (koreanChars.length <= 15) {
+        true
+    } else {
+        ratio >= 0.05f
+    }
+}
+
 suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitleUrl: String, ftpEncoding: String = "AUTO", httpHeaders: Map<String, String>? = null, providedExtension: String? = null): Pair<String?, String?> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
     try {
         // Clean up old cached_sub files (older than 24 hours) to prevent storage bloat
@@ -5472,27 +5980,29 @@ suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitl
         }
 
         val bytes = if (subtitleUrl.startsWith("smb://")) {
-            val uri = android.net.Uri.parse(subtitleUrl)
+            val encodedUrl = getSafeEncodedUrl(subtitleUrl)
+            val uri = android.net.Uri.parse(encodedUrl)
             val userInfo = uri.userInfo
             val userName = userInfo?.substringBefore(":") ?: ""
             val password = userInfo?.substringAfter(":") ?: ""
             
             val ctx = SmbManager.buildContext(userName, password)
-            val cleanUrl = subtitleUrl.replaceFirst(Regex("(?<=smb://).*?@"), "")
-            val file = jcifs.smb.SmbFile(cleanUrl, ctx)
+            val cleanUrl = encodedUrl.replaceFirst(Regex("(?<=smb://).*?@"), "")
+            val file = SmbManager.createSafeSmbFile(cleanUrl, ctx)
             val stream = file.inputStream
             val b = stream.readBytesWithLimit()
             stream.close()
             b
         } else if (subtitleUrl.startsWith("http")) {
-            val uri = android.net.Uri.parse(subtitleUrl)
+            val encodedUrl = getSafeEncodedUrl(subtitleUrl)
+            val uri = android.net.Uri.parse(encodedUrl)
             val userInfo = uri.userInfo
             val encodedUserInfo = uri.encodedUserInfo
             val authHeader = if (!userInfo.isNullOrBlank() && !encodedUserInfo.isNullOrBlank()) {
                 "Basic " + android.util.Base64.encodeToString(userInfo.toByteArray(kotlin.text.Charsets.UTF_8), android.util.Base64.NO_WRAP)
             } else null
             
-            val urlStr = if (!encodedUserInfo.isNullOrBlank()) subtitleUrl.replaceFirst("://$encodedUserInfo@", "://") else subtitleUrl
+            val urlStr = if (!encodedUserInfo.isNullOrBlank()) encodedUrl.replaceFirst("://$encodedUserInfo@", "://") else encodedUrl
             val urlObj = java.net.URL(urlStr)
             val conn = urlObj.openConnection() as java.net.HttpURLConnection
             conn.requestMethod = "GET"
@@ -5515,7 +6025,7 @@ suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitl
             val password = userInfo?.substringAfter(":", "") ?: ""
             val host = uri.host ?: ""
             val port = if (uri.port > 0) uri.port else 22
-            val remotePath = uri.path ?: ""
+            val remotePath = android.net.Uri.decode(uri.path ?: "")
             
             SftpManager.getFileBytes(host, port, username, password, remotePath).getOrNull()
         } else if (subtitleUrl.startsWith("ftp://")) {
@@ -5525,7 +6035,7 @@ suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitl
             val password = userInfo?.substringAfter(":", "") ?: ""
             val host = uri.host ?: ""
             val port = if (uri.port > 0) uri.port else 21
-            val remotePath = uri.path ?: ""
+            val remotePath = android.net.Uri.decode(uri.path ?: "")
             
             FtpManager.getFileBytes(host, port, username, password, remotePath, ftpEncoding).getOrNull()
         } else {
@@ -5537,17 +6047,26 @@ suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitl
             } else null
         }
         
-        if (bytes == null || bytes.isEmpty()) return@withContext null to null
+        if (bytes == null || bytes.isEmpty()) {
+            android.util.Log.e("SubtitleSearch", "Downloaded bytes is null or empty.")
+            return@withContext null to null
+        }
+        android.util.Log.d("SubtitleSearch", "Downloaded bytes size: ${bytes.size}")
         
         val sniffEnd = Math.min(bytes.size, 4096)
         val sniffText = String(bytes.copyOfRange(0, sniffEnd), kotlin.text.Charsets.UTF_8).lowercase()
         val isLikelySubtitle = sniffText.contains("<sami") || sniffText.contains("-->") || sniffText.contains("[script info]") || sniffText.contains("dialogue:") || sniffText.contains("webvtt")
-        if (!isLikelySubtitle && bytes.size > 1024 * 1024) return@withContext null to null
+        android.util.Log.d("SubtitleSearch", "Sniff test: isLikelySubtitle=$isLikelySubtitle, sniffTextLength=${sniffText.length}")
+        if (!isLikelySubtitle && bytes.size > 1024 * 1024) {
+            android.util.Log.e("SubtitleSearch", "Not likely a subtitle and size exceeds 1MB. Aborting.")
+            return@withContext null to null
+        }
         
         var text = ""
         val b0 = if (bytes.isNotEmpty()) bytes[0].toInt() and 0xFF else 0
         val b1 = if (bytes.size > 1) bytes[1].toInt() and 0xFF else 0
         val ext = (providedExtension ?: subtitleUrl.substringAfterLast('.')).lowercase()
+        android.util.Log.d("SubtitleSearch", "BOM check: b0=0x${Integer.toHexString(b0)}, b1=0x${Integer.toHexString(b1)}, ext=$ext")
         
         if (b0 == 0xFF && b1 == 0xFE) {
             text = String(bytes, kotlin.text.Charsets.UTF_16LE)
@@ -5558,11 +6077,28 @@ suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitl
         } else if (b0 == 0x00 && b1 == 0x3C) {
             text = String(bytes, kotlin.text.Charsets.UTF_16BE)
         } else {
-            text = String(bytes, kotlin.text.Charsets.UTF_8)
-            if (text.contains("\uFFFD") || (!text.contains("<sami", true) && ext == "smi")) {
+            android.util.Log.d("SubtitleSearch", "Encoding trying UTF-8 first")
+            val utf8Text = String(bytes, kotlin.text.Charsets.UTF_8)
+            val hasGarbled = utf8Text.contains("\uFFFD")
+            val isSmiMissingSami = !utf8Text.contains("<sami", true) && ext == "smi"
+            
+            // 만약 UTF-8 디코딩 결과에 한글이 존재하지만 유효한 한국어로 보이지 않는다면 깨진 것으로 간주
+            val hasKorean = utf8Text.any { it in '\uAC00'..'\uD7A3' }
+            val isKoreanValid = if (hasKorean) looksLikeValidKorean(utf8Text) else true
+            
+            if (hasGarbled || isSmiMissingSami || !isKoreanValid) {
+                android.util.Log.d(
+                    "SubtitleSearch", 
+                    "UTF-8 decode failure (garbled=$hasGarbled, missingSami=$isSmiMissingSami, validKorean=$isKoreanValid). Fallback to EUC-KR."
+                )
                 text = String(bytes, java.nio.charset.Charset.forName("EUC-KR"))
+            } else {
+                android.util.Log.d("SubtitleSearch", "Encoding auto-detected as UTF-8")
+                text = utf8Text
             }
         }
+        
+        android.util.Log.d("SubtitleSearch", "Decoded text snippet: ${text.take(300).replace("\n", " ")}")
         
         text = text.replace(Regex("charset=euc-kr", RegexOption.IGNORE_CASE), "charset=utf-8")
         text = text.replace(Regex("charset=\"euc-kr\"", RegexOption.IGNORE_CASE), "charset=\"utf-8\"")
@@ -5572,12 +6108,16 @@ suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitl
         val isSmi = lowerText.contains("<sami")
         val isSrt = lowerText.contains("-->")
         val isAss = lowerText.contains("[script info]") || lowerText.contains("dialogue:") || ext == "ass"
+        android.util.Log.d("SubtitleSearch", "Format check: isSmi=$isSmi, isSrt=$isSrt, isAss=$isAss")
         
         val uniqueSuffix = System.currentTimeMillis()
         if ((ext == "smi" && isSmi) || isSmi) {
+            android.util.Log.d("SubtitleSearch", "Converting SMI to SRT...")
             val srtText = convertSmiToSrt(text)
+            android.util.Log.d("SubtitleSearch", "Converted SRT snippet: ${srtText.take(300).replace("\n", " ")}")
             val cacheFile = java.io.File(context.cacheDir, "cached_sub_${uniqueSuffix}.srt")
             cacheFile.writeText(srtText, kotlin.text.Charsets.UTF_8)
+            android.util.Log.d("SubtitleSearch", "Saved converted SRT to ${cacheFile.absolutePath}")
             return@withContext "file://" + cacheFile.absolutePath to "srt"
         } else if ((ext == "srt" && isSrt) || isSrt) {
             val cacheFile = java.io.File(context.cacheDir, "cached_sub_${uniqueSuffix}.srt")
@@ -5602,16 +6142,21 @@ fun convertSmiToSrt(smiText: String): String {
     val srt = StringBuilder()
     var counter = 1
     
-    // KRCC 클래스가 있는지 확인 (멀티 클래스 SMI 파일 처리)
-    val hasKrcc = smiText.contains("KRCC", ignoreCase = true)
+    // 단순히 스타일 시트에 .KRCC 정의만 있는 것이 아니라, 실제 본문 내용 중에 <P Class=KRCC> 태그가 존재할 때만 한국어 필터 활성화
+    val hasKrcc = smiText.contains(Regex("(?i)<P[^>]*Class\\s*=\\s*[\"']?KRCC[\"']?[^>]*>"))
+    android.util.Log.d("SubtitleSearch", "convertSmiToSrt: hasKrcc=$hasKrcc")
     
     val parts = smiText.split(Regex("(?i)<SYNC"))
+    android.util.Log.d("SubtitleSearch", "convertSmiToSrt: Total SYNC parts: ${parts.size}")
+    
     var currentStart = -1L
     var currentText = ""
+    var skippedPartsCount = 0
+    var blankTextCount = 0
     
     for (i in 1 until parts.size) {
         val part = parts[i]
-        val startMatch = Regex("(?i)\\s*Start\\s*=\\s*([0-9]+)").find(part)
+        val startMatch = Regex("(?i)\\s*Start\\s*=\\s*[\"']?([0-9]+)[\"']?").find(part)
         
         if (startMatch != null) {
             val timeMs = startMatch.groupValues[1].toLong()
@@ -5619,10 +6164,25 @@ fun convertSmiToSrt(smiText: String): String {
             val textStart = part.indexOf('>')
             var rawText = if (textStart != -1) part.substring(textStart + 1) else ""
             
-            // 멀티 클래스 SMI: KRCC 클래스의 텍스트만 추출
+            // 멀티 클래스 SMI: KRCC 클래스의 텍스트만 추출 (성능 최적화 버전 - Catastrophic Backtracking 방지)
             if (hasKrcc) {
-                val krccMatch = Regex("(?i)<P[^>]*Class\\s*=\\s*[\"']?KRCC[\"']?[^>]*>(.*?)(?=<P[^>]*Class|$)", RegexOption.DOT_MATCHES_ALL).find(rawText)
-                rawText = krccMatch?.groupValues?.get(1) ?: rawText
+                val pParts = rawText.split(Regex("(?i)<P\\b"))
+                var krccText = ""
+                for (pPart in pParts) {
+                    val match = Regex("(?i)^[^>]*Class\\s*=\\s*[\"']?KRCC[\"']?[^>]*>(.*)", RegexOption.DOT_MATCHES_ALL).find(pPart)
+                    if (match != null) {
+                        krccText += (if (krccText.isEmpty()) "" else "\n") + match.groupValues[1]
+                    }
+                }
+                rawText = if (krccText.isNotEmpty()) {
+                    krccText
+                } else {
+                    if (rawText.contains("Class=", ignoreCase = true) || rawText.contains("Class\\s*=", ignoreCase = true)) {
+                        ""
+                    } else {
+                        rawText
+                    }
+                }
             }
             
             var cleanText = rawText.replace(Regex("(?i)<br[^>]*>"), "\n")
@@ -5638,6 +6198,10 @@ fun convertSmiToSrt(smiText: String): String {
             cleanText = cleanText.replace("\r\n", "\n").replace(Regex("\n{2,}"), "\n")
             cleanText = cleanText.trim()
             
+            if (cleanText.isBlank()) {
+                blankTextCount++
+            }
+            
             if (currentStart != -1L && currentText.isNotBlank()) {
                 srt.append(counter++).append("\n")
                 srt.append(formatSrtTime(currentStart)).append(" --> ").append(formatSrtTime(timeMs)).append("\n")
@@ -5646,6 +6210,8 @@ fun convertSmiToSrt(smiText: String): String {
             
             currentStart = timeMs
             currentText = cleanText
+        } else {
+            skippedPartsCount++
         }
     }
     
@@ -5655,6 +6221,7 @@ fun convertSmiToSrt(smiText: String): String {
         srt.append(currentText).append("\n\n")
     }
     
+    android.util.Log.d("SubtitleSearch", "convertSmiToSrt completed. Generated $counter SRT entries. Skipped parts (no start): $skippedPartsCount, Blank texts: $blankTextCount")
     return srt.toString()
 }
 
@@ -7851,3 +8418,181 @@ fun FavoritesScreen(
         }
     }
 }
+
+// ── VLC 재생 전용 Compose 기반 자막 오버레이 컴포넌트 ──
+
+@androidx.compose.runtime.Composable
+fun VlcSubtitleOverlay(
+    subtitleUrl: String,
+    subtitleExt: String?,
+    vlcPlayer: VlcPlayerWrapper,
+    subtitleScale: Float,
+    modifier: androidx.compose.ui.Modifier = androidx.compose.ui.Modifier
+) {
+    var subtitleCues by androidx.compose.runtime.remember(subtitleUrl) { 
+        androidx.compose.runtime.mutableStateOf<List<SubtitleCue>>(emptyList()) 
+    }
+    var currentText by androidx.compose.runtime.remember { 
+        androidx.compose.runtime.mutableStateOf("") 
+    }
+    
+    // 자막 파일 비동기 로드 및 파싱
+    androidx.compose.runtime.LaunchedEffect(subtitleUrl) {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val filePath = subtitleUrl.removePrefix("file://")
+                val file = java.io.File(filePath)
+                if (file.exists()) {
+                    val bytes = file.readBytes()
+                    var content = ""
+                    if (bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte()) {
+                        content = String(bytes, 3, bytes.size - 3, kotlin.text.Charsets.UTF_8)
+                    } else if (bytes.size >= 2 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xFE.toByte()) {
+                        content = String(bytes, 2, bytes.size - 2, kotlin.text.Charsets.UTF_16LE)
+                    } else if (bytes.size >= 2 && bytes[0] == 0xFE.toByte() && bytes[1] == 0xFF.toByte()) {
+                        content = String(bytes, 2, bytes.size - 2, kotlin.text.Charsets.UTF_16BE)
+                    } else {
+                        try {
+                            val utf8String = String(bytes, kotlin.text.Charsets.UTF_8)
+                            content = if (!utf8String.contains("\uFFFD")) {
+                                utf8String
+                            } else {
+                                String(bytes, java.nio.charset.Charset.forName("EUC-KR"))
+                            }
+                        } catch (_: Exception) {
+                            content = String(bytes, java.nio.charset.Charset.forName("EUC-KR"))
+                        }
+                    }
+                    val parsed = parseSubtitleFile(content, subtitleExt)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        subtitleCues = parsed
+                        android.util.Log.d("VlcSubtitleOverlay", "🎯 Compose 자막 오버레이: ${parsed.size}개 구간 파싱 성공.")
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("VlcSubtitleOverlay", "❌ 자막 파싱 중 오류: ${e.message}", e)
+            }
+        }
+    }
+    
+    // 100ms 주기로 재생 포지션을 확인하여 자막 갱신
+    androidx.compose.runtime.LaunchedEffect(subtitleCues) {
+        if (subtitleCues.isEmpty()) {
+            currentText = ""
+            return@LaunchedEffect
+        }
+        while (true) {
+            val pos = vlcPlayer.getCurrentPosition()
+            val cue = subtitleCues.find { pos in it.startTimeMs..it.endTimeMs }
+            currentText = cue?.text ?: ""
+            kotlinx.coroutines.delay(100)
+        }
+    }
+    
+    if (currentText.isNotEmpty()) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .padding(bottom = 64.dp),
+            contentAlignment = androidx.compose.ui.Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = androidx.compose.ui.Modifier
+                    .fillMaxWidth(0.85f)
+                    .wrapContentWidth(androidx.compose.ui.Alignment.CenterHorizontally)
+            ) {
+                androidx.compose.material3.Text(
+                    text = currentText,
+                    color = androidx.compose.ui.graphics.Color.White,
+                    fontSize = (20 * subtitleScale).sp,
+                    lineHeight = 1.4.em,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                    style = androidx.compose.ui.text.TextStyle(
+                        platformStyle = androidx.compose.ui.text.PlatformTextStyle(
+                            includeFontPadding = false
+                        ),
+                        lineHeightStyle = androidx.compose.ui.text.style.LineHeightStyle(
+                            alignment = androidx.compose.ui.text.style.LineHeightStyle.Alignment.Center,
+                            trim = androidx.compose.ui.text.style.LineHeightStyle.Trim.None
+                        ),
+                        shadow = androidx.compose.ui.graphics.Shadow(
+                            color = androidx.compose.ui.graphics.Color.Black,
+                            offset = androidx.compose.ui.geometry.Offset(2f, 2f),
+                            blurRadius = 4f
+                        )
+                    ),
+                    softWrap = true,
+                    modifier = androidx.compose.ui.Modifier.align(androidx.compose.ui.Alignment.Center)
+                )
+            }
+        }
+    }
+}
+
+data class SubtitleCue(val startTimeMs: Long, val endTimeMs: Long, val text: String)
+
+fun parseSubtitleFile(content: String, ext: String?): List<SubtitleCue> {
+    val lowerExt = ext?.lowercase() ?: ""
+    return if (lowerExt == "ass" || lowerExt == "ssa" || content.contains("[script info]", true)) {
+        parseAssFile(content)
+    } else {
+        parseSrtFile(content)
+    }
+}
+
+fun parseSrtFile(srtContent: String): List<SubtitleCue> {
+    val cues = mutableListOf<SubtitleCue>()
+    val normalized = srtContent.replace("\r\n", "\n").replace("\r", "\n")
+    val blocks = normalized.split("\n\n")
+    val timePattern = java.util.regex.Pattern.compile("(\\d{2}):(\\d{2}):(\\d{2})[.,](\\d{3})\\s*-->\\s*(\\d{2}):(\\d{2}):(\\d{2})[.,](\\d{3})")
+    
+    for (block in blocks) {
+        val lines = block.trim().split("\n")
+        if (lines.size < 2) continue
+        val timeLine = lines.find { it.contains("-->") } ?: continue
+        val timeIdx = lines.indexOf(timeLine)
+        
+        val matcher = timePattern.matcher(timeLine)
+        if (matcher.find()) {
+            val startMs = matcher.group(1).toLong() * 3600000 + matcher.group(2).toLong() * 60000 + matcher.group(3).toLong() * 1000 + matcher.group(4).toLong()
+            val endMs = matcher.group(5).toLong() * 3600000 + matcher.group(6).toLong() * 60000 + matcher.group(7).toLong() * 1000 + matcher.group(8).toLong()
+            
+            val textLines = lines.subList(timeIdx + 1, lines.size)
+            val text = textLines.joinToString("\n").trim()
+            if (text.isNotEmpty()) {
+                cues.add(SubtitleCue(startMs, endMs, text))
+            }
+        }
+    }
+    return cues
+}
+
+fun parseAssFile(assContent: String): List<SubtitleCue> {
+    val cues = mutableListOf<SubtitleCue>()
+    val lines = assContent.split("\n")
+    val pattern = java.util.regex.Pattern.compile("(?i)^Dialogue:\\s*[^,]+,\\s*(\\d+):(\\d{2}):(\\d{2})[.,](\\d{2})\\s*,\\s*(\\d+):(\\d{2}):(\\d{2})[.,](\\d{2})\\s*,(.*)")
+    
+    for (line in lines) {
+        val matcher = pattern.matcher(line.trim())
+        if (matcher.find()) {
+            val startMs = matcher.group(1).toLong() * 3600000 + matcher.group(2).toLong() * 60000 + matcher.group(3).toLong() * 1000 + matcher.group(4).toLong() * 10
+            val endMs = matcher.group(5).toLong() * 3600000 + matcher.group(6).toLong() * 60000 + matcher.group(7).toLong() * 1000 + matcher.group(8).toLong() * 10
+            
+            val rest = matcher.group(9)
+            val fields = rest.split(",")
+            if (fields.size >= 9) {
+                var text = fields.subList(8, fields.size).joinToString(",")
+                // ASS 특수 태그 및 스타일 괄호 {} 제거
+                text = text.replace(Regex("\\{[^\\}]+\\}"), "")
+                text = text.replace("\\N", "\n").replace("\\n", "\n")
+                text = text.trim()
+                if (text.isNotEmpty()) {
+                    cues.add(SubtitleCue(startMs, endMs, text))
+                }
+            }
+        }
+    }
+    return cues
+}
+

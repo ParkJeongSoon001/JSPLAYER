@@ -11,8 +11,8 @@ android {
         applicationId = "com.sv21c.jsplayer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 131
-        versionName = "1.3.1"
+        versionCode = 132
+        versionName = "1.3.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -36,7 +36,7 @@ android {
     }
     packaging {
         jniLibs {
-            excludes += "**/libffmpegJNI.so" // GPL 회피를 위해 바이너리 제외
+            // libffmpegJNI.so 제외 제거 (비디오 디코더 포함 버전을 APK에 번들)
         }
         resources {
             excludes += "META-INF/beans.xml"
@@ -87,6 +87,10 @@ dependencies {
     implementation("androidx.media3:media3-session:$media3_version")
     implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.5.0+1")
     implementation("androidx.media3:media3-datasource-okhttp:$media3_version")
+
+    // ── VLC LibVLC (LGPL 2.1) — 레거시 AVI/Xvid/DivX 폴백 플레이어 ─
+    implementation("org.videolan.android:libvlc-all:3.1.12")
+
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 
     // ── SMB / WebDAV 지원 ─────────────────────────────────────────

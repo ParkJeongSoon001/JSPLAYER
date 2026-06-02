@@ -96,12 +96,46 @@ class FtpDataSource(
             Log.d(TAG, "Passive mode - data connection: ${ftpClient.passiveHost}:${ftpClient.passivePort}")
             ftpClient.setFileType(FTP.BINARY_FILE_TYPE)
 
+            // ── 안전한 한글/공백 경로 처리 ──
+            val lastSlash = remotePath.lastIndexOf('/')
+            val parentPath = if (lastSlash >= 0) remotePath.substring(0, lastSlash) else ""
+            val fileName = if (lastSlash >= 0) remotePath.substring(lastSlash + 1) else remotePath
+
+            var targetFileName = fileName
+            var isCdSuccessful = false
+
+            if (parentPath.isNotEmpty()) {
+                if (ftpClient.changeWorkingDirectory(parentPath)) {
+                    isCdSuccessful = true
+                    Log.d(TAG, "Successfully changed FTP directory to: $parentPath")
+                    
+                    val ftpFiles = try { ftpClient.listFiles() } catch (e: Exception) { null }
+                    if (ftpFiles != null) {
+                        val targetNfc = java.text.Normalizer.normalize(fileName, java.text.Normalizer.Form.NFC)
+                        val targetNfd = java.text.Normalizer.normalize(fileName, java.text.Normalizer.Form.NFD)
+                        val matched = ftpFiles.find { file ->
+                            val name = file.name ?: ""
+                            val fileNfc = java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFC)
+                            val fileNfd = java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFD)
+                            fileNfc.equals(targetNfc, ignoreCase = true) || fileNfd.equals(targetNfd, ignoreCase = true)
+                        }
+                        if (matched != null) {
+                            targetFileName = matched.name
+                            Log.d(TAG, "FTP File matched in directory: $targetFileName")
+                        }
+                    }
+                } else {
+                    Log.w(TAG, "Failed to change FTP directory to: $parentPath, falling back to full path")
+                }
+            }
+
+            val queryPath = if (isCdSuccessful) targetFileName else remotePath
+
             // 파일 크기 조회
-            val fileSize: Long? = ftpClient.queryFileSize(remotePath)
+            val fileSize: Long? = ftpClient.queryFileSize(queryPath)
             val totalSize: Long = if (fileSize != null) {
                 fileSize
             } else {
-                // SIZE 명령이 지원되지 않는 경우
                 C.LENGTH_UNSET.toLong()
             }
 
@@ -111,7 +145,7 @@ class FtpDataSource(
             }
 
             // 파일 스트림 열기
-            var stream = ftpClient.retrieveFileStream(remotePath)
+            var stream = ftpClient.retrieveFileStream(queryPath)
 
             // AUTO 모드에서 UTF-8로 실패하면 EUC-KR로 재시도
             if (stream == null && encoding == "AUTO") {
@@ -151,16 +185,40 @@ class FtpDataSource(
                 Log.d(TAG, "Passive mode (EUC-KR retry) - data connection: ${retryClient.passiveHost}:${retryClient.passivePort}")
                 retryClient.setFileType(FTP.BINARY_FILE_TYPE)
 
-                // EUC-KR 재접속 시 파일 크기 조회 (데이터 스트림 열기 전에 수행해야 함)
-                val retrySizeVal: Long? = retryClient.queryFileSize(remotePath)
+                // EUC-KR 환경에서도 안전한 디렉터리 이동 시도
+                var isCdSuccessfulRetry = false
+                var targetFileNameRetry = fileName
+                if (parentPath.isNotEmpty()) {
+                    if (retryClient.changeWorkingDirectory(parentPath)) {
+                        isCdSuccessfulRetry = true
+                        val ftpFilesRetry = try { retryClient.listFiles() } catch (e: Exception) { null }
+                        if (ftpFilesRetry != null) {
+                            val targetNfc = java.text.Normalizer.normalize(fileName, java.text.Normalizer.Form.NFC)
+                            val targetNfd = java.text.Normalizer.normalize(fileName, java.text.Normalizer.Form.NFD)
+                            val matched = ftpFilesRetry.find { file ->
+                                val name = file.name ?: ""
+                                val fileNfc = java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFC)
+                                val fileNfd = java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFD)
+                                fileNfc.equals(targetNfc, ignoreCase = true) || fileNfd.equals(targetNfd, ignoreCase = true)
+                            }
+                            if (matched != null) {
+                                targetFileNameRetry = matched.name
+                            }
+                        }
+                    }
+                }
+                val queryPathRetry = if (isCdSuccessfulRetry) targetFileNameRetry else remotePath
+
+                // EUC-KR 재접속 시 파일 크기 조회
+                val retrySizeVal: Long? = retryClient.queryFileSize(queryPathRetry)
                 val retryTotalSize: Long = retrySizeVal ?: C.LENGTH_UNSET.toLong()
 
                 if (dataSpec.position > 0) {
                     retryClient.restartOffset = dataSpec.position
                 }
 
-                // EUC-KR 인코딩으로 경로 변환하여 시도
-                stream = retryClient.retrieveFileStream(remotePath)
+                // EUC-KR 인코딩으로 파일 스트림 열기
+                stream = retryClient.retrieveFileStream(queryPathRetry)
                 if (stream == null) {
                     val replyStr = retryClient.replyString
                     retryClient.disconnect()
@@ -236,6 +294,17 @@ class FtpDataSource(
     override fun close() {
         uri = null
         try {
+            client?.let { ftpClient ->
+                if (ftpClient.isConnected) {
+                    try {
+                        ftpClient.abort()
+                    } catch (_: Exception) {}
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "close() FTP abort failed: ${e.message}")
+        }
+        try {
             inputStream?.close()
         } catch (e: Exception) {
             Log.w(TAG, "close() inputStream close failed: ${e.message}")
@@ -243,8 +312,6 @@ class FtpDataSource(
         try {
             client?.let { ftpClient ->
                 if (ftpClient.isConnected) {
-                    ftpClient.completePendingCommand()
-                    ftpClient.logout()
                     ftpClient.disconnect()
                 }
             }

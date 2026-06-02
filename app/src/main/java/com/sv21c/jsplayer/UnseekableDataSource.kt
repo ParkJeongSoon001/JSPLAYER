@@ -49,21 +49,30 @@ class UnseekableDataSource(private val upstream: DataSource) : DataSource {
 
             // 진짜 AVI 파일의 초반부(헤더 영역)일 때만 'avih' 청크 탐색 및 변조 수행
             if (isAviFormat && bytesReadTotal < 8192L) {
-                for (i in offset until offset + bytesRead - 20) {
-                    if (buffer[i] == 'a'.code.toByte() &&
-                        buffer[i + 1] == 'v'.code.toByte() &&
-                        buffer[i + 2] == 'i'.code.toByte() &&
-                        buffer[i + 3] == 'h'.code.toByte()
-                    ) {
-                        // avih 청크 발견! dwFlags는 'avih' 문자열로부터 20바이트 뒤에 위치 (Little Endian)
-                        // AVIF_HASINDEX = 0x00000010
-                        val flagOffset = i + 20
-                        val oldByte = buffer[flagOffset].toInt()
-                        if ((oldByte and 0x10) == 0x10) {
-                            buffer[flagOffset] = (oldByte and 0xEF).toByte()
-                            android.util.Log.d("UnseekableDataSource", "Spoofed AVIF_HASINDEX flag at offset ${bytesReadTotal + i - offset}")
+                // avih(4) + 크기(4) + 패딩(4) + flags(4+1) = 최소 21바이트 필요
+                // flagOffset = i + 20 이므로 i + 20 < offset + bytesRead 보장
+                val searchEnd = offset + bytesRead - 21
+                if (searchEnd > offset) {
+                    for (i in offset until searchEnd) {
+                        if (buffer[i] == 'a'.code.toByte() &&
+                            buffer[i + 1] == 'v'.code.toByte() &&
+                            buffer[i + 2] == 'i'.code.toByte() &&
+                            buffer[i + 3] == 'h'.code.toByte()
+                        ) {
+                            // avih 청크 발견! dwFlags는 'avih' 문자열로부터 20바이트 뒤에 위치 (Little Endian)
+                            // AVIF_HASINDEX = 0x00000010
+                            val flagOffset = i + 20
+                            if (flagOffset < offset + bytesRead) {
+                                val oldByte = buffer[flagOffset].toInt()
+                                if ((oldByte and 0x10) == 0x10) {
+                                    buffer[flagOffset] = (oldByte and 0xEF).toByte()
+                                    android.util.Log.d("UnseekableDataSource", "Spoofed AVIF_HASINDEX flag at offset ${bytesReadTotal + i - offset}")
+                                }
+                            } else {
+                                android.util.Log.w("UnseekableDataSource", "avih found but flagOffset out of buffer bounds")
+                            }
+                            break // avih 청크는 하나만 존재함
                         }
-                        break // avih 청크는 하나만 존재함
                     }
                 }
             }

@@ -117,8 +117,48 @@ object SftpManager {
             ssh.authPassword(username, password)
             sftp = ssh.newSFTPClient()
             
-            val file = sftp.open(remotePath, EnumSet.of(net.schmizz.sshj.sftp.OpenMode.READ))
-            val isStr = file.ReadAheadRemoteFileInputStream(16)
+            var file: net.schmizz.sshj.sftp.RemoteFile? = null
+            try {
+                // 1차 시도: 원시 경로 그대로 오픈
+                Log.d(TAG, "getFileBytes: 1차 시도 - 원시 경로 open: $remotePath")
+                file = sftp.open(remotePath, EnumSet.of(net.schmizz.sshj.sftp.OpenMode.READ))
+            } catch (e: Exception) {
+                Log.w(TAG, "getFileBytes: 1차 시도 실패 (${e.message}). 디렉토리 리스팅 매칭(NFC/NFD/대소문자 무시) 폴백 시도...")
+                val lastSlash = remotePath.lastIndexOf('/')
+                val parentPath = if (lastSlash >= 0) remotePath.substring(0, lastSlash).ifEmpty { "/" } else "/"
+                val fileName = if (lastSlash >= 0) remotePath.substring(lastSlash + 1) else remotePath
+                
+                try {
+                    val files = sftp.ls(parentPath)
+                    val targetNfc = java.text.Normalizer.normalize(fileName, java.text.Normalizer.Form.NFC)
+                    val targetNfd = java.text.Normalizer.normalize(fileName, java.text.Normalizer.Form.NFD)
+                    
+                    val matchedFile = files.find { info ->
+                        val name = info.name ?: ""
+                        val fileNfc = java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFC)
+                        val fileNfd = java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFD)
+                        
+                        fileNfc.equals(targetNfc, ignoreCase = true) ||
+                        fileNfc.equals(targetNfd, ignoreCase = true) ||
+                        fileNfd.equals(targetNfc, ignoreCase = true) ||
+                        fileNfd.equals(targetNfd, ignoreCase = true)
+                    }
+                    
+                    if (matchedFile != null) {
+                        val actualPath = if (parentPath.endsWith("/")) "$parentPath${matchedFile.name}" else "$parentPath/${matchedFile.name}"
+                        Log.d(TAG, "getFileBytes: 매칭된 실제 서버 경로로 2차 open 시도: $actualPath")
+                        file = sftp.open(actualPath, EnumSet.of(net.schmizz.sshj.sftp.OpenMode.READ))
+                    } else {
+                        throw e
+                    }
+                } catch (le: Exception) {
+                    Log.e(TAG, "getFileBytes: 폴백 리스팅 매칭 도중 실패: ${le.message}")
+                    throw e
+                }
+            }
+            
+            val rawStream = file.RemoteFileInputStream()
+            val isStr = java.io.BufferedInputStream(rawStream, 65536)
             val bytes = isStr.readBytesWithLimit()
             isStr.close()
             file.close()

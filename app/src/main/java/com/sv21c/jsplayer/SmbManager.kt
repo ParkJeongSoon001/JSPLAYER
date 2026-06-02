@@ -39,6 +39,59 @@ object SmbManager {
             baseContext.withAnonymousCredentials()
         }
     }
+    fun createSafeSmbFile(urlStr: String, ctx: CIFSContext): SmbFile {
+        try {
+            val schemeIndex = urlStr.indexOf("://")
+            val scheme = if (schemeIndex != -1) urlStr.substring(0, schemeIndex) else "smb"
+            val remainder = if (schemeIndex != -1) urlStr.substring(schemeIndex + 3) else urlStr
+
+            var endOfAuthority = remainder.length
+            for (i in 0 until remainder.length) {
+                val c = remainder[i]
+                if (c == '/' || c == '?' || c == '#') {
+                    endOfAuthority = i
+                    break
+                }
+            }
+            val authority = remainder.substring(0, endOfAuthority)
+            val rest = remainder.substring(endOfAuthority)
+
+            val atIndex = authority.lastIndexOf('@')
+            val hostPort = if (atIndex != -1) {
+                authority.substring(atIndex + 1)
+            } else {
+                authority
+            }
+
+            val endsWithSlash = urlStr.endsWith("/")
+            val decodedRest = android.net.Uri.decode(rest)
+            val segments = decodedRest.split("/").filter { it.isNotEmpty() }
+
+            if (segments.isEmpty()) {
+                return SmbFile("$scheme://$hostPort/", ctx)
+            }
+
+            val shareName = segments[0]
+            val rootUrl = "$scheme://$hostPort/$shareName/"
+            var currentFile = SmbFile(rootUrl, ctx)
+
+            for (i in 1 until segments.size) {
+                val segment = segments[i]
+                val isLast = i == segments.size - 1
+                val childName = if (isLast) {
+                    if (endsWithSlash) "$segment/" else segment
+                } else {
+                    "$segment/"
+                }
+                currentFile = SmbFile(currentFile, childName)
+            }
+
+            return currentFile
+        } catch (e: Exception) {
+            return SmbFile(urlStr, ctx)
+        }
+    }
+
     /**
      * SMB 경로의 파일/폴더 목록 반환
      * @param smbUrl - smb://host/share/ 형태
@@ -46,7 +99,7 @@ object SmbManager {
     fun listFiles(smbUrl: String, username: String, password: String): Result<List<SmbItem>> {
         return try {
             val ctx = buildContext(username, password)
-            val dir = SmbFile(smbUrl, ctx)
+            val dir = createSafeSmbFile(smbUrl, ctx)
             val items = dir.listFiles()?.mapNotNull { file ->
                 try {
                     SmbItem(

@@ -36,6 +36,7 @@ class DLNAManager(
     private var upnpService: AndroidUpnpService? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private val discoveredUrls = ConcurrentHashMap.newKeySet<String>()
+    private val lastDiscoveryAttempts = ConcurrentHashMap<String, Long>()
 
     private var isServiceBound = false
     private var pendingSearch = false
@@ -266,6 +267,7 @@ class DLNAManager(
 
         // Reset our own tracked list
         discoveredUrls.clear()
+        lastDiscoveryAttempts.clear()
 
         // --- 2. JUPNP NORMAL SEARCH ---
         val upnpServiceNonNull = upnpService
@@ -334,6 +336,13 @@ class DLNAManager(
     }
 
     private fun onDeviceURLDiscovered(location: String, udnStr: String?, st: String?) {
+        val now = System.currentTimeMillis()
+        val lastAttempt = lastDiscoveryAttempts[location] ?: 0L
+        if (now - lastAttempt < 10000L) {
+            return
+        }
+        lastDiscoveryAttempts[location] = now
+
         if (discoveredUrls.contains(location)) return
         
         Log.d("DLNAManager", "New Device URL discovered via Raw SSDP: $location (UDN: $udnStr, ST: $st)")
@@ -431,9 +440,14 @@ class MyUpnpService : Service() {
             
             
             val config = object : AndroidUpnpServiceConfiguration() {
+
                 override fun createNetworkAddressFactory(): NetworkAddressFactory {
                     Log.d("DLNAManager", ">>> Manual Config.createNetworkAddressFactory CALLED")
                     return super.createNetworkAddressFactory()
+                }
+
+                override fun getDeviceDescriptorBinderUDA10(): org.jupnp.binding.xml.DeviceDescriptorBinder {
+                    return org.jupnp.binding.xml.RecoveringUDA10DeviceDescriptorBinderImpl()
                 }
             }
             

@@ -194,6 +194,48 @@ object FtpManager {
         }
     }
 
+    /**
+     * FTP 서버에서 디렉토리 변경을 안전하게 수행합니다.
+     * 절대경로로의 직접 변경을 시도한 후, 실패하면 루트('/') 디렉토리로 이동한 다음 
+     * 경로 요소를 하나씩 순차적으로 이동(상대경로 이동)합니다.
+     * 이를 통해 일부 FTP 서버(IIS, 간이 NAS 등)에서 하위 경로로 직접 이동할 때 발생하는 550 에러를 방지합니다.
+     */
+    private fun changeWorkingDirectorySafe(client: FTPClient, remotePath: String): Boolean {
+        val path = if (remotePath.isBlank()) "/" else remotePath
+        
+        // 1단계: 절대경로 그대로 CWD 시도
+        if (client.changeWorkingDirectory(path)) {
+            Log.d(TAG, "Successfully changed directory directly to: $path")
+            return true
+        }
+        
+        Log.w(TAG, "Direct CWD to '$path' failed (reply: ${client.replyCode} - ${client.replyString}). Retrying step-by-step...")
+        
+        // 2단계: 실패 시, 우선 루트('/')로 이동
+        if (!client.changeWorkingDirectory("/")) {
+            Log.w(TAG, "CWD to root '/' failed (reply: ${client.replyCode} - ${client.replyString})")
+        }
+        
+        // 경로 요소를 분할하여 순차적으로 이동 (빈 문자열 및 현재 위치 '.' 필터링)
+        val parts = path.split("/").filter { it.isNotEmpty() && it != "." }
+        for (part in parts) {
+            if (part == "..") {
+                if (!client.changeToParentDirectory()) {
+                    Log.w(TAG, "CWD to parent failed (reply: ${client.replyCode} - ${client.replyString})")
+                    return false
+                }
+            } else {
+                if (!client.changeWorkingDirectory(part)) {
+                    Log.w(TAG, "CWD to component '$part' failed (reply: ${client.replyCode} - ${client.replyString})")
+                    return false
+                }
+            }
+        }
+        
+        Log.d(TAG, "Successfully changed directory step-by-step to: $path")
+        return true
+    }
+
     private fun listFilesAutoDetect(
         host: String,
         port: Int,
@@ -209,6 +251,7 @@ object FtpManager {
             client.controlEncoding = "UTF-8"
             client.connectTimeout = 15000
             client.defaultTimeout = 15000
+            client.setDataTimeout(java.time.Duration.ofMillis(15000))
             Log.d(TAG, "Connecting to $host:$port (FTPS=$isFtps)")
             client.connect(host, port)
             client.soTimeout = 15000 // 소켓 읽기 타임아웃
@@ -254,7 +297,7 @@ object FtpManager {
             // ② 파일 목록 1차 조회
             val path = if (remotePath.isBlank()) "/" else remotePath
             Log.d(TAG, "Changing directory to: $path")
-            if (!client.changeWorkingDirectory(path)) {
+            if (!changeWorkingDirectorySafe(client, path)) {
                 Log.w(TAG, "CWD failed, reply: ${client.replyCode} - ${client.replyString}")
                 if (path != "/" && path.any { it.code > 127 }) {
                     client.logout()
@@ -385,6 +428,7 @@ object FtpManager {
             client.controlEncoding = encoding
             client.connectTimeout = 15000
             client.defaultTimeout = 15000
+            client.setDataTimeout(java.time.Duration.ofMillis(15000))
             client.connect(host, port)
             client.soTimeout = 15000
 
@@ -415,7 +459,7 @@ object FtpManager {
             client.setFileType(FTP.BINARY_FILE_TYPE)
 
             val path = if (remotePath.isBlank()) "/" else remotePath
-            if (!client.changeWorkingDirectory(path)) {
+            if (!changeWorkingDirectorySafe(client, path)) {
                 client.logout()
                 client.disconnect()
                 return Result.failure(Exception("폴더를 찾을 수 없습니다: $path"))
@@ -466,6 +510,8 @@ object FtpManager {
             client.controlEncoding = actualEncoding
             client.connectTimeout = 15000
             client.defaultTimeout = 15000
+            client.setDataTimeout(java.time.Duration.ofMillis(15000))
+            Log.d(TAG, "getFileBytes: Connecting to $host:$port (Encoding=$actualEncoding, FTPS=$isFtps)")
             client.connect(host, port)
             client.soTimeout = 15000
             
@@ -489,30 +535,95 @@ object FtpManager {
             client.enterLocalPassiveMode()
             client.setFileType(FTP.BINARY_FILE_TYPE)
             
-            val inputStream = client.retrieveFileStream(remotePath)
+            val lastSlash = remotePath.lastIndexOf('/')
+            val parentPath = if (lastSlash >= 0) remotePath.substring(0, lastSlash) else ""
+            val fileName = if (lastSlash >= 0) remotePath.substring(lastSlash + 1) else remotePath
+            
+            Log.d(TAG, "getFileBytes: parentPath='$parentPath', fileName='$fileName'")
+            
+            var inputStream: java.io.InputStream? = null
+            
+            if (parentPath.isNotEmpty()) {
+                if (changeWorkingDirectorySafe(client, parentPath)) {
+                    // 1차 시도: 원시 파일명 그대로 시도
+                    Log.d(TAG, "Attempting retrieveFileStream for raw fileName: $fileName")
+                    inputStream = client.retrieveFileStream(fileName)
+                    
+                    // 2차 시도: 실패 및 공백이 있는 경우 큰따옴표로 감싸서 시도
+                    if (inputStream == null && fileName.contains(' ')) {
+                        Log.d(TAG, "Raw retrieval failed or has space. Retrying with double quotes: \"$fileName\"")
+                        inputStream = client.retrieveFileStream("\"$fileName\"")
+                    }
+                    
+                    // 3차 시도: 여전히 실패한 경우 디렉토리 파일 목록 검색 매칭 (NFC/NFD 및 대소문자 무시)
+                    if (inputStream == null) {
+                        Log.d(TAG, "Retrieval failed. Fetching file list to find best matching file name...")
+                        val files = fetchFileList(client)
+                        if (files != null) {
+                            val targetNfc = java.text.Normalizer.normalize(fileName, java.text.Normalizer.Form.NFC)
+                            val targetNfd = java.text.Normalizer.normalize(fileName, java.text.Normalizer.Form.NFD)
+                            
+                            val matchedFile = files.find { file ->
+                                val name = file.name ?: ""
+                                val fileNfc = java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFC)
+                                val fileNfd = java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFD)
+                                
+                                fileNfc.equals(targetNfc, ignoreCase = true) ||
+                                fileNfc.equals(targetNfd, ignoreCase = true) ||
+                                fileNfd.equals(targetNfc, ignoreCase = true) ||
+                                fileNfd.equals(targetNfd, ignoreCase = true)
+                            }
+                            
+                            if (matchedFile != null) {
+                                val actualNameOnServer = matchedFile.name
+                                Log.d(TAG, "Matched actual file name on server: '$actualNameOnServer'")
+                                inputStream = client.retrieveFileStream(actualNameOnServer)
+                                if (inputStream == null && actualNameOnServer.contains(' ')) {
+                                    inputStream = client.retrieveFileStream("\"$actualNameOnServer\"")
+                                }
+                            } else {
+                                Log.d(TAG, "No matching file found in directory listing.")
+                            }
+                        }
+                    }
+                } else {
+                    Log.e(TAG, "Failed to change directory to parentPath: $parentPath")
+                }
+            } else {
+                Log.d(TAG, "parentPath is empty. Retrieving remotePath directly: $remotePath")
+                inputStream = client.retrieveFileStream(remotePath)
+                if (inputStream == null && remotePath.contains(' ')) {
+                    inputStream = client.retrieveFileStream("\"$remotePath\"")
+                }
+            }
             
             if (inputStream == null && encoding == "AUTO" && remotePath.any { it.code > 127 }) {
                 client.logout()
                 client.disconnect()
-                Log.i(TAG, "UTF-8 파일 접근 실패 → EUC-KR로 재접속 시도")
+                Log.i(TAG, "UTF-8 파일 접근 실패 → EUC-KR로 재접속 시도 (remotePath=$remotePath)")
                 return getFileBytes(host, port, username, password, remotePath, "EUC-KR", isFtps)
             }
             
             if (inputStream == null) {
+                val replyString = client.replyString?.trim() ?: ""
+                val replyCode = client.replyCode
                 client.logout()
                 client.disconnect()
-                return Result.failure(Exception("파일을 열 수 없습니다: $remotePath"))
+                return Result.failure(Exception("파일을 열 수 없습니다: $remotePath (Reply: $replyCode - $replyString)"))
             }
             
+            Log.d(TAG, "File stream opened successfully. Reading bytes...")
             val bytes = inputStream.readBytesWithLimit()
             inputStream.close()
-            client.completePendingCommand()
+            
+            val completed = client.completePendingCommand()
+            Log.d(TAG, "Pending command completed: $completed, read ${bytes.size} bytes.")
             
             client.logout()
             client.disconnect()
             Result.success(bytes)
         } catch (e: Exception) {
-            Log.e(TAG, "getFileBytes failed: ${e.message}")
+            Log.e(TAG, "getFileBytes failed with exception: ${e.message}", e)
             try { client.disconnect() } catch (_: Exception) {}
             Result.failure(e)
         }
@@ -557,7 +668,7 @@ object FtpManager {
      * EUC-KR 한글: 첫 바이트 0xB0~0xC8 (가~힣), 둘째 바이트 0xA1~0xFE
      * CP949 확장: 첫 바이트 0x81~0xFE, 둘째 바이트 0x41~0xFE
      */
-    private fun looksLikeEucKrRaw(bytes: ByteArray): Boolean {
+    fun looksLikeEucKrRaw(bytes: ByteArray): Boolean {
         var i = 0
         var eucKrPairs = 0
         var invalidUtf8 = false

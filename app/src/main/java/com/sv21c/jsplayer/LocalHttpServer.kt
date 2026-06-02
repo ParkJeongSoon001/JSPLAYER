@@ -141,7 +141,7 @@ class LocalHttpServer(
         // 파일 크기 사전 조회 (DLNA TV 호환성을 위해 필수)
         val fileSize = try {
             val smbContext = SmbManager.buildContext(userName, password)
-            val smbFile = jcifs.smb.SmbFile(cleanSmbUrl, smbContext)
+            val smbFile = SmbManager.createSafeSmbFile(cleanSmbUrl, smbContext)
             val size = smbFile.length()
             Log.d(TAG, "SMB 파일 크기 조회 성공: $size bytes")
             size
@@ -157,7 +157,7 @@ class LocalHttpServer(
             inputStreamProvider = {
                 try {
                     val smbContext = SmbManager.buildContext(userName, password)
-                    val smbFile = jcifs.smb.SmbFile(cleanSmbUrl, smbContext)
+                    val smbFile = SmbManager.createSafeSmbFile(cleanSmbUrl, smbContext)
                     smbFile.inputStream
                 } catch (e: Exception) {
                     Log.e(TAG, "SMB 스트림 열기 실패: ${e.message}")
@@ -449,24 +449,27 @@ class LocalHttpServer(
      * HTTP URL (이미 접근 가능한 URL)인 경우 그대로 반환
      */
     fun getStreamableUrl(videoUrl: String, subtitleUrl: String?, credentials: ServerCredentials?): Pair<String, String?> {
-        val parsedUri = android.net.Uri.parse(videoUrl)
+        val safeVideoUrl = getSafeEncodedUrl(videoUrl)
+        val safeSubtitleUrl = subtitleUrl?.let { getSafeEncodedUrl(it) }
+
+        val parsedUri = android.net.Uri.parse(safeVideoUrl)
         val scheme = parsedUri.scheme?.lowercase() ?: ""
         val fileName = parsedUri.lastPathSegment ?: "video"
 
         Log.d(TAG, "━━━ getStreamableUrl ━━━")
-        Log.d(TAG, "videoUrl: $videoUrl")
+        Log.d(TAG, "videoUrl: $safeVideoUrl")
         Log.d(TAG, "scheme: $scheme, credentials: ${if (credentials != null) "있음(user=${credentials.username})" else "없음"}")
 
         val streamVideoUrl = when {
             // WebDAV: HTTP URL이지만 인증이 필요한 경우 → 프록시를 통해 전달
             scheme.startsWith("http") && credentials != null -> {
                 Log.d(TAG, "WebDAV URL 감지 → 프록시를 통해 전달")
-                registerWebDavFile(videoUrl, credentials.username, credentials.password, fileName)
+                registerWebDavFile(safeVideoUrl, credentials.username, credentials.password, fileName)
             }
             // 일반 HTTP URL (DLNA 등) → 그대로 사용
             scheme.startsWith("http") -> {
                 Log.d(TAG, "일반 HTTP URL → 그대로 사용")
-                videoUrl
+                safeVideoUrl
             }
             scheme == "content" -> registerContentUri(parsedUri, fileName)
             scheme == "file" -> {
@@ -476,20 +479,20 @@ class LocalHttpServer(
             scheme == "smb" -> {
                 val user = credentials?.username ?: ""
                 val pass = credentials?.password ?: ""
-                registerSmbFile(videoUrl, user, pass, fileName)
+                registerSmbFile(safeVideoUrl, user, pass, fileName)
             }
             scheme == "ftp" -> {
-                registerFtpFile(videoUrl, fileName)
+                registerFtpFile(safeVideoUrl, fileName)
             }
             scheme == "sftp" -> {
-                registerSftpFile(videoUrl, fileName)
+                registerSftpFile(safeVideoUrl, fileName)
             }
             else -> {
                 // content:// 또는 로컬 파일 경로
-                if (videoUrl.startsWith("/")) {
-                    registerLocalFile(videoUrl)
+                if (safeVideoUrl.startsWith("/")) {
+                    registerLocalFile(safeVideoUrl)
                 } else {
-                    registerContentUri(android.net.Uri.parse(videoUrl), fileName)
+                    registerContentUri(android.net.Uri.parse(safeVideoUrl), fileName)
                 }
             }
         }
@@ -497,39 +500,39 @@ class LocalHttpServer(
         Log.d(TAG, "변환 결과: $streamVideoUrl")
 
         // 자막 URL 처리
-        val streamSubtitleUrl = if (subtitleUrl != null) {
-            val subParsedUri = android.net.Uri.parse(subtitleUrl)
+        val streamSubtitleUrl = if (safeSubtitleUrl != null) {
+            val subParsedUri = android.net.Uri.parse(safeSubtitleUrl)
             val subScheme = subParsedUri.scheme?.lowercase() ?: ""
             when {
                 // WebDAV 자막도 프록시 필요
                 subScheme.startsWith("http") && credentials != null -> {
                     val subFileName = subParsedUri.lastPathSegment ?: "subtitle.srt"
-                    registerWebDavFile(subtitleUrl, credentials.username, credentials.password, subFileName)
+                    registerWebDavFile(safeSubtitleUrl, credentials.username, credentials.password, subFileName)
                 }
-                subScheme.startsWith("http") -> subtitleUrl
+                subScheme.startsWith("http") -> safeSubtitleUrl
                 subScheme == "content" -> {
                     val subFileName = subParsedUri.lastPathSegment ?: "subtitle.srt"
                     registerContentUri(subParsedUri, subFileName)
                 }
-                subScheme == "file" || subtitleUrl.startsWith("/") -> {
-                    val path = subtitleUrl.removePrefix("file://")
+                subScheme == "file" || safeSubtitleUrl.startsWith("/") -> {
+                    val path = safeSubtitleUrl.removePrefix("file://")
                     registerSubtitleFile(path)
                 }
                 subScheme == "smb" -> {
                     val user = credentials?.username ?: ""
                     val pass = credentials?.password ?: ""
                     val subFileName = subParsedUri.lastPathSegment ?: "subtitle.srt"
-                    registerSmbFile(subtitleUrl, user, pass, subFileName)
+                    registerSmbFile(safeSubtitleUrl, user, pass, subFileName)
                 }
                 subScheme == "ftp" -> {
                     val subFileName = subParsedUri.lastPathSegment ?: "subtitle.srt"
-                    registerFtpFile(subtitleUrl, subFileName)
+                    registerFtpFile(safeSubtitleUrl, subFileName)
                 }
                 subScheme == "sftp" -> {
                     val subFileName = subParsedUri.lastPathSegment ?: "subtitle.srt"
-                    registerSftpFile(subtitleUrl, subFileName)
+                    registerSftpFile(safeSubtitleUrl, subFileName)
                 }
-                else -> subtitleUrl
+                else -> safeSubtitleUrl
             }
         } else null
 
@@ -800,6 +803,113 @@ class LocalHttpServer(
             java.net.URLEncoder.encode(name, "UTF-8").replace("+", "%20")
         } catch (e: Exception) {
             name
+        }
+    }
+
+    private fun getSafeEncodedUrl(url: String): String {
+        try {
+            val schemeIndex = url.indexOf("://")
+            if (schemeIndex == -1) {
+                return url
+            }
+            val scheme = url.substring(0, schemeIndex)
+            val remainder = url.substring(schemeIndex + 3)
+
+            var endOfAuthority = remainder.length
+            for (i in 0 until remainder.length) {
+                val c = remainder[i]
+                if (c == '/' || c == '?' || c == '#') {
+                    endOfAuthority = i
+                    break
+                }
+            }
+            val authority = remainder.substring(0, endOfAuthority)
+            val rest = remainder.substring(endOfAuthority)
+
+            val atIndex = authority.lastIndexOf('@')
+            val userInfoStr: String
+            val hostPort: String
+            if (atIndex != -1) {
+                val rawUserInfo = authority.substring(0, atIndex)
+                hostPort = authority.substring(atIndex + 1)
+
+                val colonIndex = rawUserInfo.indexOf(':')
+                userInfoStr = if (colonIndex != -1) {
+                    val user = rawUserInfo.substring(0, colonIndex)
+                    val pass = rawUserInfo.substring(colonIndex + 1)
+                    val decUser = android.net.Uri.decode(user)
+                    val decPass = android.net.Uri.decode(pass)
+                    val encUser = android.net.Uri.encode(decUser)
+                    val encPass = android.net.Uri.encode(decPass)
+                    "$encUser:$encPass@"
+                } else {
+                    val decUser = android.net.Uri.decode(rawUserInfo)
+                    val encUser = android.net.Uri.encode(decUser)
+                    "$encUser@"
+                }
+            } else {
+                userInfoStr = ""
+                hostPort = authority
+            }
+
+            var path = ""
+            var query = ""
+            var fragment = ""
+
+            var tempRest = rest
+            val hashIndex = tempRest.indexOf('#')
+            if (hashIndex != -1) {
+                fragment = tempRest.substring(hashIndex)
+                tempRest = tempRest.substring(0, hashIndex)
+            }
+
+            val questionIndex = tempRest.indexOf('?')
+            if (questionIndex != -1) {
+                query = tempRest.substring(questionIndex)
+                path = tempRest.substring(0, questionIndex)
+            } else {
+                path = tempRest
+            }
+
+            val encodedPath = if (path.isNotEmpty()) {
+                val decodedPath = android.net.Uri.decode(path)
+                val segments = decodedPath.split("/")
+                segments.joinToString("/") { segment ->
+                    android.net.Uri.encode(segment)
+                }
+            } else {
+                ""
+            }
+
+            val encodedQuery = if (query.length > 1) {
+                val queryContent = query.substring(1)
+                "?" + queryContent.split("&").joinToString("&") { pair ->
+                    val eqIndex = pair.indexOf('=')
+                    if (eqIndex != -1) {
+                        val key = pair.substring(0, eqIndex)
+                        val value = pair.substring(eqIndex + 1)
+                        val decKey = android.net.Uri.decode(key)
+                        val decValue = android.net.Uri.decode(value)
+                        "${android.net.Uri.encode(decKey)}=${android.net.Uri.encode(decValue)}"
+                    } else {
+                        val decPair = android.net.Uri.decode(pair)
+                        android.net.Uri.encode(decPair)
+                    }
+                }
+            } else {
+                query
+            }
+
+            val encodedFragment = if (fragment.length > 1) {
+                val fragContent = fragment.substring(1)
+                "#" + android.net.Uri.encode(android.net.Uri.decode(fragContent))
+            } else {
+                fragment
+            }
+
+            return "$scheme://$userInfoStr$hostPort$encodedPath$encodedQuery$encodedFragment"
+        } catch (e: Exception) {
+            return url
         }
     }
 }

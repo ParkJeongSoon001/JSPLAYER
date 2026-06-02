@@ -76,6 +76,9 @@ private fun getAllLibraries(): List<LibraryLicense> = listOf(
     LibraryLicense("AndroidX Media3 DataSource OkHttp", "1.5.0",
         "OkHttp 기반 HTTP 데이터소스 어댑터", "Apache License 2.0",
         LicenseType.APACHE2, "https://github.com/androidx/media", "미디어 / 코덱"),
+    LibraryLicense("LibVLC Android", "3.1.12",
+        "VLC 미디어 플레이어 엔진 (레거시 비디오/오디오 디코더 지원)", "GNU Lesser General Public License v2.1",
+        LicenseType.LGPL21, "https://code.videolan.org/videolan/libvlc-android", "미디어 / 코덱"),
 
     // ── 네트워크 프로토콜 ──
     LibraryLicense("jCIFS-NG", "2.1.10",

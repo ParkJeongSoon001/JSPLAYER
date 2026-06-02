@@ -113,7 +113,11 @@ object FfmpegLoader {
     }
 
     /**
-     * 앱 시작 시 호출하여 외부 파일 로드를 시도합니다.
+     * 앱 시작 시 호출하여 FFmpeg 네이티브 라이브러리를 로드합니다.
+     *
+     * 로드 우선순위:
+     * 1) APK 번들 libffmpegJNI.so (System.loadLibrary) — 비디오+오디오 디코더 포함
+     * 2) 사용자 수동 설치 .so (System.load) — 코덱 팩 ZIP으로 설치된 경우
      */
     fun initialize(context: Context): Boolean {
         if (isLoaded) {
@@ -121,34 +125,98 @@ object FfmpegLoader {
             return true
         }
 
+        Log.d(TAG, "FFmpeg 초기화 시작 (ABI: ${getRequiredAbi()})")
+
+        // ── 1순위: APK 번들 .so (System.loadLibrary) ──────────────
+        // build.gradle.kts에서 excludes 제거로 APK에 번들됨
+        // Jellyfin AAR의 libffmpegJNI.so: mpeg4, wmv3, vp6, h263 등 비디오 디코더 포함
+        try {
+            System.loadLibrary("ffmpegJNI")
+            isLoaded = true
+            lastLoadError = null
+            Log.i(TAG, "✅ APK 번들 libffmpegJNI.so 로드 성공 (비디오+오디오 디코더 포함)")
+            forceMedia3LibraryLoaded()
+            checkMedia3Availability()
+            return true
+        } catch (e: UnsatisfiedLinkError) {
+            Log.w(TAG, "APK 번들 .so 로드 실패: ${e.message}")
+        }
+
+        // ── 2순위: 사용자 수동 설치 .so (System.load) ─────────────
         val soFile = getTargetSoFile(context)
-        Log.d(TAG, "Checking for FFmpeg library at: ${soFile.absolutePath} (ABI: ${getRequiredAbi()})")
-        
+        Log.d(TAG, "폴백: 수동 설치 .so 확인 → ${soFile.absolutePath}")
+
         if (!soFile.exists()) {
-            Log.w(TAG, "libffmpegJNI.so not found at target directory.")
+            Log.w(TAG, "수동 설치 .so도 없음. FFmpeg 라이브러리 사용 불가.")
             return false
         }
 
         return try {
-            // JVM에 네이티브 라이브러리 로드
             System.load(soFile.absolutePath)
             isLoaded = true
             lastLoadError = null
-            Log.d(TAG, "Successfully loaded dynamic libffmpegJNI.so from ${soFile.absolutePath}")
-            
-            // Media3 확장 라이브러리가 이를 인식하는지 확인
+            Log.d(TAG, "✅ 수동 설치 .so 로드 성공: ${soFile.absolutePath} (${soFile.length()} bytes)")
+            forceMedia3LibraryLoaded()
             checkMedia3Availability()
             true
         } catch (e: UnsatisfiedLinkError) {
-            Log.e(TAG, "Failed to load FFmpeg library due to ABI mismatch or missing dependencies: ${e.message}")
+            Log.e(TAG, "수동 설치 .so 로드 실패 (ABI 불일치): ${e.message}")
             lastLoadError = "ABI 불일치 또는 의존성 오류: ${e.message}"
             isLoaded = false
             false
         } catch (e: Exception) {
-            Log.e(TAG, "Unknown error while loading FFmpeg library: ${e.message}")
+            Log.e(TAG, "수동 설치 .so 로드 중 알 수 없는 오류: ${e.message}")
             lastLoadError = "알 수 없는 오류: ${e.message}"
             isLoaded = false
             false
+        }
+    }
+
+    /**
+     * AAR에 번들된 libffmpegJNI.so를 앱 내부 저장소로 추출합니다. (deprecated)
+     * build.gradle.kts에서 .so 제외가 제거되어 System.loadLibrary()로 직접 로드 가능.
+     */
+    @Suppress("unused")
+    private fun extractBundledSoFromAar(context: Context, targetFile: File): Boolean {
+        Log.w(TAG, "extractBundledSoFromAar: 더 이상 필요하지 않음. APK 번들 .so 사용.")
+        return false
+    }
+
+    /**
+     * Media3 LibraryLoader의 내부 isLoaded 플래그를 강제로 true로 설정합니다.
+     * 외부 .so 파일을 System.load()로 직접 로드했기 때문에, Media3 내부의 
+     * System.loadLibrary("ffmpegJNI") 호출 실패로 인한 availability 판단 오류를 방어합니다.
+     */
+    private fun forceMedia3LibraryLoaded() {
+        try {
+            // 1. FfmpegLibrary 클래스 로드
+            val ffmpegLibraryClass = Class.forName("androidx.media3.decoder.ffmpeg.FfmpegLibrary")
+            
+            // 2. LOADER static 필드 룩업
+            val loaderField = ffmpegLibraryClass.getDeclaredField("LOADER")
+            loaderField.isAccessible = true
+            val loader = loaderField.get(null)
+            
+            if (loader != null) {
+                // 3. LibraryLoader 클래스의 필드 룩업 및 설정
+                val loaderClass = loader.javaClass
+                
+                // isLoaded 필드 강제 주입
+                val isLoadedField = loaderClass.getDeclaredField("isLoaded")
+                isLoadedField.isAccessible = true
+                isLoadedField.setBoolean(loader, true)
+                
+                // failed 필드 강제 리셋
+                try {
+                    val failedField = loaderClass.getDeclaredField("failed")
+                    failedField.isAccessible = true
+                    failedField.setBoolean(loader, false)
+                } catch (_: Exception) {}
+                
+                Log.i(TAG, "✅ Successfully forced Media3 LibraryLoader.isLoaded = true")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "⚠️ Failed to force Media3 LibraryLoader state: ${e.message}")
         }
     }
 
@@ -164,6 +232,55 @@ object FfmpegLoader {
             
             if (isAvailable) {
                 Log.i(TAG, "✅ Media3 FFmpeg extension is READY to use the native library.")
+                
+                // FFmpeg이 지원하는 코덱 진단
+                try {
+                    val supportsFormatMethod = clazz.getMethod("supportsFormat", String::class.java)
+                    val testMimeTypes = listOf(
+                        // 비디오 코덱
+                        "video/mp4v-es" to "MPEG-4 Part 2 (DivX/Xvid)",
+                        "video/x-ms-wmv" to "WMV",
+                        "video/x-vnd.on2.vp6" to "VP6",
+                        "video/3gpp" to "H.263",
+                        "video/mpeg" to "MPEG-1",
+                        "video/mpeg2" to "MPEG-2",
+                        // 오디오 코덱  
+                        "audio/ac3" to "AC3 (Dolby Digital)",
+                        "audio/eac3" to "E-AC3",
+                        "audio/vnd.dts" to "DTS",
+                        "audio/x-ms-wma" to "WMA"
+                    )
+                    
+                    val videoSupported = mutableListOf<String>()
+                    val videoUnsupported = mutableListOf<String>()
+                    
+                    for ((mime, name) in testMimeTypes) {
+                        val supported = supportsFormatMethod.invoke(null, mime) as Boolean
+                        val emoji = if (supported) "✅" else "❌"
+                        Log.i(TAG, "$emoji FFmpeg codec: $name ($mime) = ${if (supported) "SUPPORTED" else "NOT SUPPORTED"}")
+                        
+                        if (mime.startsWith("video/")) {
+                            if (supported) videoSupported.add(name) else videoUnsupported.add(name)
+                        }
+                    }
+                    
+                    if (videoSupported.isEmpty()) {
+                        Log.w(TAG, "⚠️ FFmpeg에 비디오 디코더가 없습니다! DivX/Xvid 재생 불가.")
+                        Log.w(TAG, "⚠️ 비디오 디코더 포함된 코덱 팩을 설치해야 합니다.")
+                    } else {
+                        Log.i(TAG, "🎬 FFmpeg 비디오 디코더 지원: ${videoSupported.joinToString(", ")}")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "FFmpeg 코덱 진단 실패: ${e.message}")
+                }
+                
+                // ExperimentalFfmpegVideoRenderer 존재 확인
+                try {
+                    Class.forName("androidx.media3.decoder.ffmpeg.ExperimentalFfmpegVideoRenderer")
+                    Log.i(TAG, "✅ ExperimentalFfmpegVideoRenderer 클래스 사용 가능")
+                } catch (e: ClassNotFoundException) {
+                    Log.w(TAG, "❌ ExperimentalFfmpegVideoRenderer 클래스 없음 — FFmpeg 비디오 디코딩 불가")
+                }
             } else {
                 Log.w(TAG, "⚠️ Media3 FFmpeg extension reports NOT AVAILABLE. (Native library loaded but not recognized by extension)")
                 // 이 상황이 발생하면, extension 내부에서 System.loadLibrary("ffmpegJNI")가 실패했음을 의미함.

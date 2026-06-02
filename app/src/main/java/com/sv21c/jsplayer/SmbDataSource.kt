@@ -26,10 +26,11 @@ class SmbDataSource(
             transferInitializing(dataSpec)
             
             val ctx = contextProvider(uri!!)
-            val cleanUriString = uri.toString().replaceFirst(Regex("(?<=smb://).*?@"), "")
+            val encodedUrl = com.sv21c.jsplayer.getSafeEncodedUrl(uri.toString())
+            val cleanUriString = encodedUrl.replaceFirst(Regex("(?<=smb://).*?@"), "")
             
             // Pass clean URL to SmbFile to avoid credential conflicts
-            val smbFile = SmbFile(cleanUriString, ctx)
+            val smbFile = SmbManager.createSafeSmbFile(cleanUriString, ctx)
             
             file = SmbRandomAccessFile(smbFile, "r")
             
