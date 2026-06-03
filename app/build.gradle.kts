@@ -11,8 +11,8 @@ android {
         applicationId = "com.sv21c.jsplayer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 132
-        versionName = "1.3.2"
+        versionCode = 133
+        versionName = "1.3.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -37,6 +37,8 @@ android {
     packaging {
         jniLibs {
             // libffmpegJNI.so 제외 제거 (비디오 디코더 포함 버전을 APK에 번들)
+            // 16KB 메모리 페이지 크기 기기 지원을 위한 네이티브 라이브러리 정렬
+            useLegacyPackaging = false
         }
         resources {
             excludes += "META-INF/beans.xml"
@@ -81,15 +83,15 @@ dependencies {
     implementation("org.slf4j:slf4j-api:2.0.7")
     implementation("org.slf4j:slf4j-simple:2.0.7")
     // Media3 (ExoPlayer) for Video Playback
-    val media3_version = "1.5.0"
+    val media3_version = "1.9.0"
     implementation("androidx.media3:media3-exoplayer:$media3_version")
     implementation("androidx.media3:media3-ui:$media3_version")
     implementation("androidx.media3:media3-session:$media3_version")
-    implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.5.0+1")
+    implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1")
     implementation("androidx.media3:media3-datasource-okhttp:$media3_version")
 
     // ── VLC LibVLC (LGPL 2.1) — 레거시 AVI/Xvid/DivX 폴백 플레이어 ─
-    implementation("org.videolan.android:libvlc-all:3.1.12")
+    implementation("org.videolan.android:libvlc-all:4.0.0-eap25")
 
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 

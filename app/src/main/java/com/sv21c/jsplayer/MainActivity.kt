@@ -7510,48 +7510,6 @@ fun HomeScreen(
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                 ) {
-                    var showCodecDialog by remember { mutableStateOf(false) }
-                    
-                    if (showCodecDialog) {
-                        CodecInstallDialog(
-                            onDismiss = {
-                                showCodecDialog = false
-                                // 안내창 닫힌 후 수동 복사했을 수도 있으니 다시 로드 시도
-                                FfmpegLoader.initialize(context)
-                            },
-                            onZipClick = onZipClick,
-                            resultMessage = codecInstallResultMessage
-                        )
-                    }
-
-                    var isCodecFocused by remember { mutableStateOf(false) }
-                    TextButton(
-                        onClick = { showCodecDialog = true },
-                        modifier = Modifier
-                            .onFocusChanged { isCodecFocused = it.isFocused }
-                            .focusable()
-                            .onKeyEvent { event ->
-                                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionCenter) {
-                                    showCodecDialog = true
-                                    true
-                                } else false
-                            }
-                            .background(
-                                color = if (isCodecFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
-                                shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
-                            ),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "[추가 코덱 설치 안내]",
-                            color = if (isCodecFocused) Color.White else Color(0xFF94A3B8),
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(16.dp))
-
                     var isSettingsFocused by remember { mutableStateOf(false) }
                     TextButton(
                         onClick = onSettingsClick,
