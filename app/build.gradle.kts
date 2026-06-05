@@ -11,8 +11,8 @@ android {
         applicationId = "com.sv21c.jsplayer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 133
-        versionName = "1.3.3"
+        versionCode = 134
+        versionName = "1.3.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -91,7 +91,7 @@ dependencies {
     implementation("androidx.media3:media3-datasource-okhttp:$media3_version")
 
     // ── VLC LibVLC (LGPL 2.1) — 레거시 AVI/Xvid/DivX 폴백 플레이어 ─
-    implementation("org.videolan.android:libvlc-all:4.0.0-eap25")
+    implementation("org.videolan.android:libvlc-all:3.7.2")
 
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 
@@ -139,4 +139,10 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    compilerOptions {
+        freeCompilerArgs.add("-XXLanguage:-K2")
+    }
 }

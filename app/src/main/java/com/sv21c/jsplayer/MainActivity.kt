@@ -954,7 +954,7 @@ class MainActivity : ComponentActivity() {
                                     networkBrowsingCredentials = null
                                     screenState = ScreenState.FtpSftpServerList()
                                 },
-                                onGoogleDriveSuccess = { account ->
+                                onGoogleDriveSuccess = { account: com.google.android.gms.auth.api.signin.GoogleSignInAccount ->
                                     val navCreds = ServerCredentials(
                                         type = "GOOGLE_DRIVE",
                                         host = "drive.google.com",
@@ -999,7 +999,7 @@ class MainActivity : ComponentActivity() {
                             FavoritesScreen(
                                 isTvMode = isTvMode,
                                 onBackClick = { triggerBack() },
-                                onPlayVideo = { item ->
+                                onPlayVideo = { item: FavoriteItem ->
                                     // 즐겨찾기에서 재생 시 네트워크 credentials 복원
                                     if (item.credentialsJson != null) {
                                         try {
@@ -1008,10 +1008,16 @@ class MainActivity : ComponentActivity() {
                                         } catch (_: Exception) {}
                                     }
                                     // httpHeaders 복원
-                                    val headers = if (item.httpHeaders != null) {
+                                    val rawHttpHeaders: String? = item.httpHeaders
+                                    val headers: Map<String, String> = if (rawHttpHeaders != null) {
                                         try {
-                                            val jo = org.json.JSONObject(item.httpHeaders)
-                                            jo.keys().asSequence().associateWith { jo.getString(it) }
+                                            val jo: org.json.JSONObject = org.json.JSONObject(rawHttpHeaders)
+                                            val keyList = mutableListOf<String>()
+                                            val keysIterator = jo.keys()
+                                            while (keysIterator.hasNext()) {
+                                                keyList.add(keysIterator.next())
+                                            }
+                                            keyList.associateWith { key -> jo.getString(key) }
                                         } catch (_: Exception) { emptyMap() }
                                     } else emptyMap()
                                     
@@ -1099,7 +1105,7 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                 },
-                                onNavigateToFolder = { item ->
+                                onNavigateToFolder = { item: FavoriteItem ->
                                     when (item.sourceType) {
                                         "LOCAL" -> {
                                             localBrowsingActiveMode = true
@@ -1314,7 +1320,7 @@ class MainActivity : ComponentActivity() {
                                                         val sniffEnd = Math.min(bytes.size, 4096)
                                                         val sniffText = String(bytes.copyOfRange(0, sniffEnd), kotlin.text.Charsets.UTF_8).lowercase()
                                                         val isLikelySubtitle = sniffText.contains("<sami") || sniffText.contains("-->") || sniffText.contains("[script info]") || sniffText.contains("dialogue:") || sniffText.contains("webvtt")
-                                                        if (!isLikelySubtitle && bytes.size > 1024 * 1024) {
+                                                        if (!isLikelySubtitle && bytes.size.compareTo(1024 * 1024) > 0) {
                                                             android.util.Log.d("SubtitleSearch", "Fetch failed: Doesn't look like a subtitle")
                                                             return false
                                                         }
@@ -1322,7 +1328,7 @@ class MainActivity : ComponentActivity() {
                                                         // Detect UTF-16 BOM or typical starting bytes
                                                         var text = ""
                                                         val b0 = if (bytes.isNotEmpty()) bytes[0].toInt() and 0xFF else 0
-                                                        val b1 = if (bytes.size > 1) bytes[1].toInt() and 0xFF else 0
+                                                        val b1 = if (bytes.size.compareTo(1) > 0) bytes[1].toInt() and 0xFF else 0
                                                         
                                                         if (b0 == 0xFF && b1 == 0xFE) {
                                                             text = String(bytes, kotlin.text.Charsets.UTF_16LE)
@@ -1572,11 +1578,11 @@ class MainActivity : ComponentActivity() {
                                                                 val sniffEnd = Math.min(bytes.size, 4096)
                                                                 val sniffText = String(bytes.copyOfRange(0, sniffEnd), kotlin.text.Charsets.UTF_8).lowercase()
                                                                 val isLikelySubtitle = sniffText.contains("<sami") || sniffText.contains("-->") || sniffText.contains("[script info]") || sniffText.contains("dialogue:") || sniffText.contains("webvtt")
-                                                                if (!isLikelySubtitle && bytes.size > 1024 * 1024) throw Exception("Doesn't look like a subtitle")
+                                                                if (!isLikelySubtitle && bytes.size.compareTo(1024 * 1024) > 0) throw Exception("Doesn't look like a subtitle")
                                                                 
                                                                 var text = ""
                                                                 val b0 = bytes[0].toInt() and 0xFF
-                                                                val b1 = if (bytes.size > 1) bytes[1].toInt() and 0xFF else 0
+                                                                val b1 = if (bytes.size.compareTo(1) > 0) bytes[1].toInt() and 0xFF else 0
                                                                 
                                                                 if (b0 == 0xFF && b1 == 0xFE) {
                                                                     text = String(bytes, kotlin.text.Charsets.UTF_16LE)
@@ -3182,6 +3188,8 @@ fun VideoPlayerScreen(
     var lastVideoDecoderName by remember { androidx.compose.runtime.mutableStateOf("") }
     // VLC 폴백 상태 — 모든 Android 디코더 실패 시 VLC LibVLC로 전환
     var useVlcFallback by remember { androidx.compose.runtime.mutableStateOf(false) }
+    var vlcTargetSeekPosition by remember { androidx.compose.runtime.mutableStateOf<Long?>(null) }
+    var lastSeekTriggerTime by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
     val vlcPlayer = remember {
         VlcPlayerWrapper(context).apply {
             onError = { msg ->
@@ -3953,6 +3961,18 @@ fun VideoPlayerScreen(
         }
     }
 
+    LaunchedEffect(lastSeekTriggerTime) {
+        if (lastSeekTriggerTime > 0L) {
+            delay(400L) // 400ms 디바운스
+            vlcTargetSeekPosition?.let {
+                if (useVlcFallback) {
+                    vlcPlayer.seekTo(it)
+                }
+            }
+            vlcTargetSeekPosition = null
+        }
+    }
+
     fun resetHideTimer() { hideTimerKey++; onControlVisibilityChange(true) }
 
     fun executeButton(index: Int) {
@@ -4247,7 +4267,13 @@ fun VideoPlayerScreen(
                         Key.DirectionLeft -> {
                             if (isControlVisible) {
                                 if (focusedButtonIndex == 100) {
-                                    exoPlayer.seekTo((exoPlayer.currentPosition - 5_000L).coerceAtLeast(0L))
+                                    if (useVlcFallback) {
+                                        val base = vlcTargetSeekPosition ?: vlcPlayer.getCurrentPosition()
+                                        vlcTargetSeekPosition = (base - 5_000L).coerceAtLeast(0L)
+                                        lastSeekTriggerTime = System.currentTimeMillis()
+                                    } else {
+                                        exoPlayer.seekTo((exoPlayer.currentPosition - 5_000L).coerceAtLeast(0L))
+                                    }
                                 } else {
                                     focusedButtonIndex = when (focusedButtonIndex) {
                                         6 -> 5
@@ -4266,14 +4292,27 @@ fun VideoPlayerScreen(
                                 }
                                 resetHideTimer()
                             } else {
-                                exoPlayer.seekTo((exoPlayer.currentPosition - remoteSeekTime * 1000L).coerceAtLeast(0L))
+                                if (useVlcFallback) {
+                                    val base = vlcTargetSeekPosition ?: vlcPlayer.getCurrentPosition()
+                                    vlcTargetSeekPosition = (base - remoteSeekTime * 1000L).coerceAtLeast(0L)
+                                    lastSeekTriggerTime = System.currentTimeMillis()
+                                } else {
+                                    exoPlayer.seekTo((exoPlayer.currentPosition - remoteSeekTime * 1000L).coerceAtLeast(0L))
+                                }
                             }
                             true
                         }
                         Key.DirectionRight -> {
                             if (isControlVisible) {
                                 if (focusedButtonIndex == 100) {
-                                    exoPlayer.seekTo((exoPlayer.currentPosition + 5_000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
+                                    if (useVlcFallback) {
+                                        val base = vlcTargetSeekPosition ?: vlcPlayer.getCurrentPosition()
+                                        val dur = vlcPlayer.getDuration().coerceAtLeast(0L)
+                                        vlcTargetSeekPosition = (base + 5_000L).coerceAtMost(dur)
+                                        lastSeekTriggerTime = System.currentTimeMillis()
+                                    } else {
+                                        exoPlayer.seekTo((exoPlayer.currentPosition + 5_000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
+                                    }
                                 } else {
                                     focusedButtonIndex = when (focusedButtonIndex) {
                                         5 -> 6
@@ -4293,16 +4332,32 @@ fun VideoPlayerScreen(
                                 }
                                 resetHideTimer()
                             } else {
-                                exoPlayer.seekTo((exoPlayer.currentPosition + remoteSeekTime * 1000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
+                                if (useVlcFallback) {
+                                    val base = vlcTargetSeekPosition ?: vlcPlayer.getCurrentPosition()
+                                    val dur = vlcPlayer.getDuration().coerceAtLeast(0L)
+                                    vlcTargetSeekPosition = (base + remoteSeekTime * 1000L).coerceAtMost(dur)
+                                    lastSeekTriggerTime = System.currentTimeMillis()
+                                } else {
+                                    exoPlayer.seekTo((exoPlayer.currentPosition + remoteSeekTime * 1000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
+                                }
                             }
                             true
                         }
                         Key.MediaPrevious -> {
-                            exoPlayer.seekTo((exoPlayer.currentPosition - bluetoothSeekTime * 1000L).coerceAtLeast(0L))
+                            if (useVlcFallback) {
+                                vlcPlayer.seekTo((vlcPlayer.getCurrentPosition() - bluetoothSeekTime * 1000L).coerceAtLeast(0L))
+                            } else {
+                                exoPlayer.seekTo((exoPlayer.currentPosition - bluetoothSeekTime * 1000L).coerceAtLeast(0L))
+                            }
                             true
                         }
                         Key.MediaNext -> {
-                            exoPlayer.seekTo((exoPlayer.currentPosition + bluetoothSeekTime * 1000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
+                            if (useVlcFallback) {
+                                val dur = vlcPlayer.getDuration().coerceAtLeast(0L)
+                                vlcPlayer.seekTo((vlcPlayer.getCurrentPosition() + bluetoothSeekTime * 1000L).coerceAtMost(dur))
+                            } else {
+                                exoPlayer.seekTo((exoPlayer.currentPosition + bluetoothSeekTime * 1000L).coerceAtMost(exoPlayer.duration.coerceAtLeast(0L)))
+                            }
                             true
                         }
                         Key.DirectionUp -> {
@@ -4562,7 +4617,8 @@ fun VideoPlayerScreen(
                 // Progress Slider (Interactive)
                 if (showProgressBar) {
                     Slider(
-                        value = if (isDragging) dragPosition.toFloat() else currentPosition.toFloat(),
+                        value = if (isDragging) dragPosition.toFloat() else if (vlcTargetSeekPosition != null) vlcTargetSeekPosition!!.toFloat() else currentPosition.toFloat(),
+                        enabled = !useVlcFallback || totalDuration > 1000L,
                         onValueChange = { 
                             isDragging = true
                             dragPosition = it.toLong()
@@ -4574,8 +4630,8 @@ fun VideoPlayerScreen(
                         },
                         valueRange = 0f..totalDuration.toFloat().coerceAtLeast(1f),
                         colors = SliderDefaults.colors(
-                            thumbColor = PrimaryColor,
-                            activeTrackColor = PrimaryColor,
+                            thumbColor = if (!useVlcFallback || totalDuration > 1000L) PrimaryColor else Color.Gray,
+                            activeTrackColor = if (!useVlcFallback || totalDuration > 1000L) PrimaryColor else Color.Gray,
                             inactiveTrackColor = Color.White.copy(alpha = 0.24f)
                         ),
                         modifier = Modifier
@@ -4594,7 +4650,7 @@ fun VideoPlayerScreen(
                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 14.dp),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(formatSrtTime(currentPosition).substringBefore(","), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
+                        Text(formatSrtTime(vlcTargetSeekPosition ?: currentPosition).substringBefore(","), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
                         Text(formatSrtTime(totalDuration).substringBefore(","), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
                     }
                 }
