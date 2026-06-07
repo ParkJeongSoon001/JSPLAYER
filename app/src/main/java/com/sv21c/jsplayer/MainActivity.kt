@@ -302,7 +302,11 @@ class MainActivity : ComponentActivity() {
                 if (!info.isEncoder) {
                     val supported = info.supportedTypes.filter { it.contains("mp4v", ignoreCase = true) || it.contains("mpeg4", ignoreCase = true) }
                     if (supported.isNotEmpty()) {
-                        android.util.Log.w("ExoPlayer_Debug", "📱 Found MPEG4 decoder: ${info.name} (HW:${info.isHardwareAccelerated}, SWOnly:${info.isSoftwareOnly}, Types:$supported)")
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            android.util.Log.w("ExoPlayer_Debug", "📱 Found MPEG4 decoder: ${info.name} (HW:${info.isHardwareAccelerated}, SWOnly:${info.isSoftwareOnly}, Types:$supported)")
+                        } else {
+                            android.util.Log.w("ExoPlayer_Debug", "📱 Found MPEG4 decoder: ${info.name} (Types:$supported)")
+                        }
                     }
                 }
             }

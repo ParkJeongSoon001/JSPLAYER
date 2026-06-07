@@ -9,10 +9,10 @@ android {
 
     defaultConfig {
         applicationId = "com.sv21c.jsplayer"
-        minSdk = 26
+        minSdk = 29
         targetSdk = 36
-        versionCode = 134
-        versionName = "1.3.4"
+        versionCode = 135
+        versionName = "1.3.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
