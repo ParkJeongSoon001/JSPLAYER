@@ -69,7 +69,7 @@ class FtpDataSource(
             ftpClient.connectTimeout = 15000
             ftpClient.defaultTimeout = 15000
             ftpClient.dataTimeout = java.time.Duration.ofMillis(30000)  // 데이터 소켓 타임아웃
-            ftpClient.setBufferSize(1024 * 1024)  // 데이터 전송 버퍼 크기
+            ftpClient.setBufferSize(256 * 1024)  // 데이터 전송 버퍼 크기 (메모리 절약)
 
             // ── 인코딩 설정 (connect() 전에 해야 함) ──
             when (encoding) {
@@ -170,7 +170,7 @@ class FtpDataSource(
                 retryClient.connectTimeout = 15000
                 retryClient.defaultTimeout = 15000
                 retryClient.dataTimeout = java.time.Duration.ofMillis(30000)
-                retryClient.setBufferSize(1024 * 1024)
+                retryClient.setBufferSize(256 * 1024)
                 retryClient.controlEncoding = "EUC-KR"
                 retryClient.connect(host, port)
                 if (!retryClient.login(username, password)) {
@@ -225,7 +225,7 @@ class FtpDataSource(
                     throw IOException("FTP retrieveFileStream returned null (EUC-KR): $replyStr")
                 }
 
-                inputStream = java.io.BufferedInputStream(stream, 1024 * 1024)
+                inputStream = java.io.BufferedInputStream(stream, 256 * 1024)
                 client = retryClient
 
                 bytesToRead = if (dataSpec.length == C.LENGTH_UNSET.toLong()) {
@@ -240,7 +240,7 @@ class FtpDataSource(
             } else if (stream == null) {
                 throw IOException("FTP retrieveFileStream returned null: ${ftpClient.replyString}")
             } else {
-                inputStream = java.io.BufferedInputStream(stream, 1024 * 1024) // 1MB buffer
+                inputStream = java.io.BufferedInputStream(stream, 256 * 1024) // 256KB buffer (메모리 절약)
                 client = ftpClient
 
                 bytesToRead = if (dataSpec.length == C.LENGTH_UNSET.toLong()) {

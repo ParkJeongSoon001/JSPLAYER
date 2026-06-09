@@ -190,9 +190,9 @@ class DLNAManager(
             // Get all devices already in the registry
             val upnpServiceNonNull = upnpService ?: return
             
-            Log.d("DLNAManager", "Registry listener adding...")
+            Log.d("DLNAManager", "Checking existing registry devices...")
             upnpServiceNonNull.registry?.let { registry ->
-                registry.addListener(registryListener)
+                // 리스너는 이미 위(line 83)에서 등록됨 — 중복 등록 방지
                 for (device in registry.devices) {
                     onDeviceAdded(device)
                 }

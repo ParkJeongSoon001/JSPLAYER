@@ -25,7 +25,7 @@ class SftpDataSource : BaseDataSource(/* isNetwork = */ true) {
 
     companion object {
         private const val TAG = "SftpDataSource"
-        private const val BUFFER_SIZE = 1024 * 1024  // 1MB
+        private const val BUFFER_SIZE = 256 * 1024  // 256KB (메모리 절약)
 
         init {
             // X25519 등 최신 암호 알고리즘 지원 보장

@@ -3460,13 +3460,13 @@ fun VideoPlayerScreen(
 
         val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                if (isLocalProxyUrl) 50000 else 32000,   // 프록시일 때 버퍼 확대
-                if (isLocalProxyUrl) 262144 else 131072,  // maxBufferMs
-                if (isLocalProxyUrl) 5000 else 2500,      // bufferForPlaybackMs
-                if (isLocalProxyUrl) 10000 else 5000      // bufferForPlaybackAfterRebufferMs
+                if (isLocalProxyUrl) 50000 else 30000,   // minBufferMs (프록시일 때 50초, 일반 30초)
+                if (isLocalProxyUrl) 90000 else 50000,   // maxBufferMs (OOM 방지: 기본값 수준으로 축소)
+                if (isLocalProxyUrl) 5000 else 2500,     // bufferForPlaybackMs
+                if (isLocalProxyUrl) 10000 else 5000     // bufferForPlaybackAfterRebufferMs
             )
-            .setPrioritizeTimeOverSizeThresholds(true)
-            .setTargetBufferBytes(64 * 1024 * 1024) // 디코더 스톨 시 무한 로딩 OOM 방지
+            .setPrioritizeTimeOverSizeThresholds(false) // 크기 제한(targetBufferBytes) 우선 → OOM 방지
+            .setTargetBufferBytes(32 * 1024 * 1024) // 32MB 상한 (셋톱박스 등 저메모리 기기 대응)
             .build()
 
 

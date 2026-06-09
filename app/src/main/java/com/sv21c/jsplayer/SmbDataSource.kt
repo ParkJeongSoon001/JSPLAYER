@@ -48,7 +48,7 @@ class SmbDataSource(
                 override fun close() {
                     file?.close()
                 }
-            }, 1024 * 1024) // 1MB buffer
+            }, 256 * 1024) // 256KB buffer (메모리 절약)
             
             val fileLength = file?.length() ?: 0L
             val bytesRemaining = fileLength - dataSpec.position
