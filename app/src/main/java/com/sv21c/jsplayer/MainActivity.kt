@@ -2957,10 +2957,12 @@ fun VideoPlayerScreen(
 
     var finalSubtitleUrl by remember { mutableStateOf<String?>(null) }
     var finalSubtitleExt by remember { mutableStateOf<String?>(null) }
+    var originalSubtitleUrl by remember { mutableStateOf<String?>(null) }
     var isSubReady by remember { mutableStateOf(false) }
     
     LaunchedEffect(subtitleUrl, videoUrl) {
         isSubReady = false
+        subtitleOffsetMs = 0L
         try {
             kotlinx.coroutines.withTimeoutOrNull(10000L) {
                 if (subtitleUrl != null) {
@@ -2968,6 +2970,7 @@ fun VideoPlayerScreen(
             if (subtitleUrl.startsWith("file://") && subtitleUrl.contains("cached_sub")) {
                 finalSubtitleUrl = subtitleUrl
                 finalSubtitleExt = subtitleExtension
+                originalSubtitleUrl = subtitleUrl
                 android.util.Log.d("AutoPlay", "VideoPlayerScreen: Using cached subtitle: $finalSubtitleUrl")
                 isSubReady = true
             } else {
@@ -2975,10 +2978,12 @@ fun VideoPlayerScreen(
                 if (url != null) {
                     finalSubtitleUrl = url
                     finalSubtitleExt = ext
+                    originalSubtitleUrl = url
                     android.util.Log.d("AutoPlay", "VideoPlayerScreen: Downloaded and processed subtitle: $finalSubtitleUrl (ext=$finalSubtitleExt)")
                 } else {
                     finalSubtitleUrl = subtitleUrl
                     finalSubtitleExt = subtitleExtension
+                    originalSubtitleUrl = subtitleUrl
                     android.util.Log.d("AutoPlay", "VideoPlayerScreen: Download failed, using raw URL: $finalSubtitleUrl")
                 }
                 isSubReady = true
@@ -3019,6 +3024,7 @@ fun VideoPlayerScreen(
                                                 if (url != null) {
                                                     finalSubtitleUrl = url
                                                     finalSubtitleExt = ext
+                                                    originalSubtitleUrl = url
                                                     android.util.Log.d("AutoPlay", "VideoPlayerScreen: Local subtitle found: $url (ext=$ext)")
                                                 }
                                             } else {
@@ -3137,6 +3143,7 @@ fun VideoPlayerScreen(
                                     if (url != null) {
                                         finalSubtitleUrl = url
                                         finalSubtitleExt = ext
+                                        originalSubtitleUrl = url
                                     }
                                 } else {
                                     android.util.Log.d("AutoPlay", "VideoPlayerScreen: No matching subtitle found in remote directory")
@@ -3161,6 +3168,7 @@ fun VideoPlayerScreen(
                                 if (url != null) {
                                     finalSubtitleUrl = url
                                     finalSubtitleExt = ext
+                                    originalSubtitleUrl = url
                                     android.util.Log.d("AutoPlay", "VideoPlayerScreen: Probe found subtitle: $finalSubtitleUrl (ext=$finalSubtitleExt)")
                                     probeFound = true
                                     break
@@ -3704,32 +3712,56 @@ fun VideoPlayerScreen(
         }
     }
 
-    // --- 자막 오프셋 적용 (SRT 타임스탬프 수정 후 자막 트랙 재로드) ---
+    // --- 자막 오프셋 적용 (모든 포맷 지원: SRT/ASS/VTT, 원본 기준 오프셋 계산) ---
     LaunchedEffect(subtitleOffsetMs) {
-        if (subtitleOffsetMs == 0L) return@LaunchedEffect
-        if (finalSubtitleUrl == null) return@LaunchedEffect
+        if (originalSubtitleUrl == null) return@LaunchedEffect
+        // VLC 모드에서는 VlcSubtitleOverlay에서 실시간 오프셋 처리하므로 ExoPlayer 자막 재로드 불필요
+        if (useVlcFallback) return@LaunchedEffect
         
-        val subtitlePath = finalSubtitleUrl!!.removePrefix("file://")
+        // Debounce: 빠르게 연속 클릭 시 마지막 값만 적용 (200ms 대기)
+        kotlinx.coroutines.delay(200L)
+        
+        val sourceUrl = originalSubtitleUrl!!  // ★ 항상 원본 기준
+        val subtitlePath = sourceUrl.removePrefix("file://")
         val subtitleFile = java.io.File(subtitlePath)
-        if (!subtitleFile.exists()) return@LaunchedEffect
+        if (!subtitleFile.exists()) {
+            android.util.Log.e("VideoPlayerScreen", "원본 자막 파일 없음: $subtitlePath")
+            return@LaunchedEffect
+        }
         
         val ext = finalSubtitleExt?.lowercase() ?: subtitleFile.extension.lowercase()
-        // SRT 파일만 오프셋 적용 (SMI는 이미 SRT로 변환됨)
-        if (ext != "srt") return@LaunchedEffect
         
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                val originalSrt = subtitleFile.readText(kotlin.text.Charsets.UTF_8)
-                val adjustedSrt = adjustSrtTimestamps(originalSrt, subtitleOffsetMs)
-                val offsetFile = java.io.File(context.cacheDir, "cached_sub_offset_${System.currentTimeMillis()}.srt")
-                offsetFile.writeText(adjustedSrt, kotlin.text.Charsets.UTF_8)
+                val originalText = subtitleFile.readText(kotlin.text.Charsets.UTF_8)
+                
+                // 오프셋이 0이면 원본 그대로 사용
+                val adjustedText = if (subtitleOffsetMs == 0L) {
+                    originalText
+                } else {
+                    when (ext) {
+                        "ass", "ssa" -> adjustAssTimestamps(originalText, subtitleOffsetMs)
+                        "vtt" -> adjustVttTimestamps(originalText, subtitleOffsetMs)
+                        else -> adjustSrtTimestamps(originalText, subtitleOffsetMs) // srt 및 기타
+                    }
+                }
+                
+                val targetExt = if (ext in listOf("ass", "ssa")) "ass" else if (ext == "vtt") "vtt" else "srt"
+                val offsetFile = java.io.File(context.cacheDir, "cached_sub_offset.$targetExt")
+                offsetFile.writeText(adjustedText, kotlin.text.Charsets.UTF_8)
                 
                 val currentPos = exoPlayer.currentPosition
                 val wasPlaying = exoPlayer.isPlaying
                 
+                val mimeType = when (ext) {
+                    "ass", "ssa" -> androidx.media3.common.MimeTypes.TEXT_SSA
+                    "vtt" -> androidx.media3.common.MimeTypes.TEXT_VTT
+                    else -> androidx.media3.common.MimeTypes.APPLICATION_SUBRIP
+                }
+                
                 val newSubUri = android.net.Uri.parse("file://" + offsetFile.absolutePath)
                 val newSubConfig = MediaItem.SubtitleConfiguration.Builder(newSubUri)
-                    .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_SUBRIP)
+                    .setMimeType(mimeType)
                     .setLanguage("ko")
                     .setSelectionFlags(androidx.media3.common.C.SELECTION_FLAG_DEFAULT or androidx.media3.common.C.SELECTION_FLAG_FORCED)
                     .setRoleFlags(androidx.media3.common.C.ROLE_FLAG_SUBTITLE)
@@ -3746,10 +3778,10 @@ fun VideoPlayerScreen(
                     exoPlayer.prepare()
                     exoPlayer.seekTo(currentPos)
                     exoPlayer.playWhenReady = wasPlaying
-                    android.util.Log.d("VideoPlayerScreen", "Subtitle offset applied: ${subtitleOffsetMs}ms")
+                    android.util.Log.d("VideoPlayerScreen", "자막 오프셋 적용 완료: ${subtitleOffsetMs}ms (포맷=$ext)")
                 }
             } catch (e: Exception) {
-                android.util.Log.e("VideoPlayerScreen", "Failed to apply subtitle offset", e)
+                android.util.Log.e("VideoPlayerScreen", "자막 오프셋 적용 실패", e)
             }
         }
     }
@@ -3948,18 +3980,24 @@ fun VideoPlayerScreen(
     }
 
     // --- Position update (500ms) ---
-    LaunchedEffect(exoPlayer, useVlcFallback) {
+    LaunchedEffect(exoPlayer, useVlcFallback, isControlVisible, isCasting, isLongPressing) {
         while (true) {
-            if (useVlcFallback) {
-                // VLC 재생 시 VLC에서 위치/재생시간 읽기
-                currentPosition = vlcPlayer.getCurrentPosition().coerceAtLeast(0L)
-                val vlcDur = vlcPlayer.getDuration()
-                if (vlcDur > 0L) totalDuration = vlcDur
-                isPlaying = vlcPlayer.isPlaying()
+            val shouldUpdate = isControlVisible || isCasting || isLongPressing
+            if (shouldUpdate) {
+                if (useVlcFallback) {
+                    // VLC 재생 시 VLC에서 위치/재생시간 읽기
+                    currentPosition = vlcPlayer.getCurrentPosition().coerceAtLeast(0L)
+                    val vlcDur = vlcPlayer.getDuration()
+                    if (vlcDur > 0L) totalDuration = vlcDur
+                    isPlaying = vlcPlayer.isPlaying()
+                } else {
+                    currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
+                    totalDuration = exoPlayer.duration.coerceAtLeast(1L)
+                    isPlaying = exoPlayer.isPlaying
+                }
             } else {
-                currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
-                totalDuration = exoPlayer.duration.coerceAtLeast(1L)
-                isPlaying = exoPlayer.isPlaying
+                // 화면 갱신이 불필요한 상황에서는 isPlaying 상태만 최소한으로 갱신
+                isPlaying = if (useVlcFallback) vlcPlayer.isPlaying() else exoPlayer.isPlaying
             }
             delay(500L)
         }
@@ -4037,8 +4075,8 @@ fun VideoPlayerScreen(
             11 -> { mainActivity?.enterPipMode(); return }
             12 -> { onClose(); return }
             13 -> { showRendererDialog = true } // 캐스트 버튼
-            14 -> subtitleOffsetMs = (subtitleOffsetMs - 500L).coerceIn(-5000L, 5000L)
-            15 -> subtitleOffsetMs = (subtitleOffsetMs + 500L).coerceIn(-5000L, 5000L)
+            14 -> subtitleOffsetMs = (subtitleOffsetMs - 500L).coerceIn(-30000L, 30000L)
+            15 -> subtitleOffsetMs = (subtitleOffsetMs + 500L).coerceIn(-30000L, 30000L)
             -100 -> showSubtitleDialog = true
             -101 -> showPlayerSettingsDialog = true
         }
@@ -4539,7 +4577,8 @@ fun VideoPlayerScreen(
                         subtitleUrl = finalSubtitleUrl!!,
                         subtitleExt = finalSubtitleExt,
                         vlcPlayer = vlcPlayer,
-                        subtitleScale = subtitleScale
+                        subtitleScale = subtitleScale,
+                        subtitleOffsetMs = subtitleOffsetMs
                     )
                 }
             }
@@ -4893,9 +4932,9 @@ fun VideoPlayerScreen(
                     // ─── 자막싱크: 0s [－][＋] ───
                     Text("자막싱크", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
                     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 14) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = (subtitleOffsetMs - 500L).coerceIn(-5000L, 5000L); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 14) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = (subtitleOffsetMs - 500L).coerceIn(-30000L, 30000L); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
                         Text(if (subtitleOffsetMs == 0L) "0s" else "${if (subtitleOffsetMs > 0) "+" else ""}${subtitleOffsetMs / 1000f}s", color = if (subtitleOffsetMs != 0L) Color(0xFFFFD54F) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.widthIn(min = 32.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 15) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = (subtitleOffsetMs + 500L).coerceIn(-5000L, 5000L); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 15) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = (subtitleOffsetMs + 500L).coerceIn(-30000L, 30000L); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
                     }
 
                     Box(Modifier.width(110.dp).height(1.dp).background(Color.White.copy(alpha = 0.12f)))
@@ -6309,6 +6348,49 @@ fun adjustSrtTimestamps(srtText: String, offsetMs: Long): String {
         val totalMs = (h * 3600000 + m * 60000 + s * 1000 + ms + offsetMs).coerceAtLeast(0L)
         formatSrtTime(totalMs)
     }
+}
+
+fun adjustAssTimestamps(assText: String, offsetMs: Long): String {
+    if (offsetMs == 0L) return assText
+    val timePattern = Regex("(\\d):(\\d{2}):(\\d{2})\\.(\\d{2})")
+    return timePattern.replace(assText) { match ->
+        val h = match.groupValues[1].toLong()
+        val m = match.groupValues[2].toLong()
+        val s = match.groupValues[3].toLong()
+        val cs = match.groupValues[4].toLong()
+        val totalMs = (h * 3600000 + m * 60000 + s * 1000 + cs * 10 + offsetMs).coerceAtLeast(0L)
+        formatAssTime(totalMs)
+    }
+}
+
+fun formatAssTime(ms: Long): String {
+    val h = ms / 3600000
+    val m = (ms % 3600000) / 60000
+    val s = (ms % 60000) / 1000
+    val cs = (ms % 1000) / 10
+    return String.format(java.util.Locale.US, "%d:%02d:%02d.%02d", h, m, s, cs)
+}
+
+fun adjustVttTimestamps(vttText: String, offsetMs: Long): String {
+    if (offsetMs == 0L) return vttText
+    val timePattern = Regex("(?:(\\d{2}):)?(\\d{2}):(\\d{2})\\.(\\d{3})")
+    return timePattern.replace(vttText) { match ->
+        val hStr = match.groupValues[1]
+        val h = if (hStr.isNotEmpty()) hStr.toLong() else 0L
+        val m = match.groupValues[2].toLong()
+        val s = match.groupValues[3].toLong()
+        val ms = match.groupValues[4].toLong()
+        val totalMs = (h * 3600000 + m * 60000 + s * 1000 + ms + offsetMs).coerceAtLeast(0L)
+        formatVttTime(totalMs)
+    }
+}
+
+fun formatVttTime(ms: Long): String {
+    val h = ms / 3600000
+    val m = (ms % 3600000) / 60000
+    val s = (ms % 60000) / 1000
+    val msRem = ms % 1000
+    return String.format(java.util.Locale.US, "%02d:%02d:%02d.%03d", h, m, s, msRem)
 }
 
 fun java.io.InputStream.readBytesWithLimit(limit: Int = 10 * 1024 * 1024): ByteArray {
@@ -8445,6 +8527,7 @@ fun VlcSubtitleOverlay(
     subtitleExt: String?,
     vlcPlayer: VlcPlayerWrapper,
     subtitleScale: Float,
+    subtitleOffsetMs: Long = 0L,
     modifier: androidx.compose.ui.Modifier = androidx.compose.ui.Modifier
 ) {
     var subtitleCues by androidx.compose.runtime.remember(subtitleUrl) { 
@@ -8494,14 +8577,15 @@ fun VlcSubtitleOverlay(
     }
     
     // 100ms 주기로 재생 포지션을 확인하여 자막 갱신
-    androidx.compose.runtime.LaunchedEffect(subtitleCues) {
+    androidx.compose.runtime.LaunchedEffect(subtitleCues, subtitleOffsetMs) {
         if (subtitleCues.isEmpty()) {
             currentText = ""
             return@LaunchedEffect
         }
         while (true) {
             val pos = vlcPlayer.getCurrentPosition()
-            val cue = subtitleCues.find { pos in it.startTimeMs..it.endTimeMs }
+            val adjustedPos = pos - subtitleOffsetMs
+            val cue = subtitleCues.find { adjustedPos in it.startTimeMs..it.endTimeMs }
             currentText = cue?.text ?: ""
             kotlinx.coroutines.delay(100)
         }

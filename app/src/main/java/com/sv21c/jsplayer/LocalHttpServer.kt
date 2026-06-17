@@ -342,6 +342,7 @@ class LocalHttpServer(
         // 파일 크기 조회: HEAD 요청 사용 (PROPFIND보다 훨씬 빠름)
         val fileSize = try {
             val client = okhttp3.OkHttpClient.Builder()
+                .ignoreSslErrors()
                 .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
@@ -365,6 +366,7 @@ class LocalHttpServer(
                 try {
                     Log.d(TAG, "🌐 WebDAV 스트림 연결 시작: $cleanUrl")
                     val client = okhttp3.OkHttpClient.Builder()
+                        .ignoreSslErrors()
                         .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
                         .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)  // 스트리밍은 무제한
                         .build()
@@ -389,6 +391,7 @@ class LocalHttpServer(
                 try {
                     Log.d(TAG, "🌐 WebDAV Range 스트림 연결: bytes=$start-$end")
                     val client = okhttp3.OkHttpClient.Builder()
+                        .ignoreSslErrors()
                         .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
                         .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
                         .build()
@@ -790,11 +793,11 @@ class LocalHttpServer(
     private fun guessSubtitleMimeType(fileName: String): String {
         val lower = fileName.lowercase()
         return when {
-            lower.endsWith(".srt") -> "text/srt"
-            lower.endsWith(".ass") || lower.endsWith(".ssa") -> "text/x-ssa"
+            lower.endsWith(".srt") -> "application/x-subrip"
+            lower.endsWith(".ass") || lower.endsWith(".ssa") -> "application/x-ssa"
             lower.endsWith(".vtt") -> "text/vtt"
             lower.endsWith(".smi") -> "application/x-sami"
-            else -> "text/plain"
+            else -> "application/octet-stream"
         }
     }
 

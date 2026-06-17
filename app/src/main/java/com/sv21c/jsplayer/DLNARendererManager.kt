@@ -484,16 +484,16 @@ class DLNARendererManager(
         }
     }
 
-    private fun guessSubtitleMimeType(url: String): String {
-        val lower = url.lowercase()
-        return when {
-            lower.endsWith(".srt") -> "text/srt"
-            lower.endsWith(".ass") || lower.endsWith(".ssa") -> "text/x-ssa"
-            lower.endsWith(".vtt") -> "text/vtt"
-            lower.endsWith(".smi") -> "application/x-sami"
-            else -> "text/plain"
+        private fun guessSubtitleMimeType(url: String): String {
+            val lower = url.lowercase()
+            return when {
+                lower.endsWith(".srt") -> "application/x-subrip"
+                lower.endsWith(".ass") || lower.endsWith(".ssa") -> "application/x-ssa"
+                lower.endsWith(".vtt") -> "text/vtt"
+                lower.endsWith(".smi") -> "application/x-sami"
+                else -> "application/octet-stream"
+            }
         }
-    }
 
     /**
      * 밀리초 → HH:MM:SS 포맷 변환 (DLNA 형식)

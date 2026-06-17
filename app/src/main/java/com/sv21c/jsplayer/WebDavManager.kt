@@ -38,6 +38,7 @@ object WebDavManager {
 
     private fun buildSardine(username: String, password: String): OkHttpSardine {
         val client = OkHttpClient.Builder()
+            .ignoreSslErrors()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .build()
