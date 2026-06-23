@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -366,36 +367,47 @@ fun NetworkBrowseScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     itemsIndexed(sortedItems) { _, item ->
-                        val (name, path, isDir, isVideo) = when (item) {
-                            is SmbItem -> Quadruple(item.name, item.path, item.isDirectory,
-                                SmbManager.isVideoFile(item.name) && !item.isDirectory)
-                            is WebDavItem -> Quadruple(item.name, item.href, item.isDirectory,
-                                WebDavManager.isVideoFile(item.name) && !item.isDirectory)
-                            is FtpItem -> Quadruple(item.name, item.path, item.isDirectory,
-                                FtpManager.isVideoFile(item.name) && !item.isDirectory)
-                            is SftpItem -> Quadruple(item.name, item.path, item.isDirectory,
-                                SftpManager.isVideoFile(item.name) && !item.isDirectory)
-                            is GoogleDriveItem -> Quadruple(item.name, item.id, item.isDirectory,
-                                GoogleDriveManager.isVideoFile(item.mimeType, item.name) && !item.isDirectory)
-                            is OneDriveItem -> Quadruple(item.name, item.downloadUrl ?: item.id, item.isDirectory,
-                                OneDriveManager.isVideoFile(item.name) && !item.isDirectory)
+                        val (name, path, isDir, isVideo, isAudio) = when (item) {
+                            is SmbItem -> Quintuple(item.name, item.path, item.isDirectory,
+                                SmbManager.isVideoFile(item.name) && !item.isDirectory,
+                                SmbManager.isAudioFile(item.name) && !item.isDirectory)
+                            is WebDavItem -> Quintuple(item.name, item.href, item.isDirectory,
+                                WebDavManager.isVideoFile(item.name) && !item.isDirectory,
+                                WebDavManager.isAudioFile(item.name) && !item.isDirectory)
+                            is FtpItem -> Quintuple(item.name, item.path, item.isDirectory,
+                                FtpManager.isVideoFile(item.name) && !item.isDirectory,
+                                FtpManager.isAudioFile(item.name) && !item.isDirectory)
+                            is SftpItem -> Quintuple(item.name, item.path, item.isDirectory,
+                                SftpManager.isVideoFile(item.name) && !item.isDirectory,
+                                SftpManager.isAudioFile(item.name) && !item.isDirectory)
+                            is GoogleDriveItem -> Quintuple(item.name, item.id, item.isDirectory,
+                                GoogleDriveManager.isVideoFile(item.mimeType, item.name) && !item.isDirectory,
+                                GoogleDriveManager.isAudioFile(item.mimeType, item.name) && !item.isDirectory)
+                            is OneDriveItem -> Quintuple(item.name, item.downloadUrl ?: item.id, item.isDirectory,
+                                OneDriveManager.isVideoFile(item.name) && !item.isDirectory,
+                                OneDriveManager.isAudioFile(item.name) && !item.isDirectory)
                             else -> return@itemsIndexed
                         }
-                        val iconVector = if (isDir) Icons.Default.Folder else Icons.Default.PlayArrow
+                        val iconVector = when {
+                            isDir -> Icons.Default.Folder
+                            isAudio -> Icons.Default.MusicNote
+                            else -> Icons.Default.PlayArrow
+                        }
                         val iconTint = if (isDir) secondaryColor else primaryColor
                         val focusRequester = remember { FocusRequester() }
                         var isFocused by remember { mutableStateOf(false) }
 
                         // 즐겨찾기 데이터 준비
-                        val showStar = isDir || isVideo
-                        val favVideoUrl = if (isVideo && showStar) getTargetPlayUrl(item, credentials) else ""
+                        val isPlayable = isVideo || isAudio
+                        val showStar = isDir || isPlayable
+                        val favPlayUrl = if (isPlayable && showStar) getTargetPlayUrl(item, credentials) else ""
                         val favSourcePath = if (showStar) when {
                             credentials.type == "ONEDRIVE" && item is OneDriveItem -> item.id
                             credentials.type == "GOOGLE_DRIVE" && item is GoogleDriveItem -> item.id
                             else -> path
                         } else ""
-                        var isFav by remember(favVideoUrl, favSourcePath) {
-                            mutableStateOf(if (showStar) FavoriteStore.isFavoriteByKey(context, favVideoUrl, favSourcePath) else false)
+                        var isFav by remember(favPlayUrl, favSourcePath) {
+                            mutableStateOf(if (showStar) FavoriteStore.isFavoriteByKey(context, favPlayUrl, favSourcePath) else false)
                         }
 
                         // 즐겨찾기 토글 실행 함수
@@ -466,7 +478,7 @@ fun NetworkBrowseScreen(
                             val favItem = FavoriteItem(
                                 id = java.util.UUID.randomUUID().toString(),
                                 title = name,
-                                videoUrl = favVideoUrl,
+                                videoUrl = favPlayUrl,
                                 isDirectory = isDir,
                                 sourceType = credentials.type,
                                 sourcePath = favSourcePath,
@@ -503,7 +515,7 @@ fun NetworkBrowseScreen(
                                                             android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
                                                         } else {
                                                             if (isDir) onFolderClick(path, name)
-                                                            else if (isVideo) {
+                                                            else if (isPlayable) {
                                                                 val playUrl = when (item) {
                                                                     is GoogleDriveItem -> GoogleDriveManager.getStreamUrl(item.id)
                                                                     is OneDriveItem -> item.downloadUrl ?: OneDriveManager.getStreamUrl(item.id)
@@ -529,7 +541,7 @@ fun NetworkBrowseScreen(
                                     } else {
                                         Modifier.clickable {
                                             if (isDir) onFolderClick(path, name)
-                                            else if (isVideo) {
+                                            else if (isPlayable) {
                                                 val playUrl = when (item) {
                                                     is GoogleDriveItem -> GoogleDriveManager.getStreamUrl(item.id)
                                                     is OneDriveItem -> item.downloadUrl ?: OneDriveManager.getStreamUrl(item.id)
@@ -795,27 +807,27 @@ private fun handleVideoClick(
     } else null to null
 
     // 플레이리스트 구성
-    val videoItemsList = sortedItems.filter { itm ->
-        val (_, _, _, itIsVideo) = when (itm) {
-            is SmbItem -> Quadruple(itm.name, itm.path, itm.isDirectory, SmbManager.isVideoFile(itm.name) && !itm.isDirectory)
-            is WebDavItem -> Quadruple(itm.name, itm.href, itm.isDirectory, WebDavManager.isVideoFile(itm.name) && !itm.isDirectory)
-            is FtpItem -> Quadruple(itm.name, itm.path, itm.isDirectory, FtpManager.isVideoFile(itm.name) && !itm.isDirectory)
-            is SftpItem -> Quadruple(itm.name, itm.path, itm.isDirectory, SftpManager.isVideoFile(itm.name) && !itm.isDirectory)
-            is GoogleDriveItem -> Quadruple(itm.name, itm.id, itm.isDirectory, GoogleDriveManager.isVideoFile(itm.mimeType, itm.name) && !itm.isDirectory)
-            is OneDriveItem -> Quadruple(itm.name, itm.downloadUrl ?: itm.id, itm.isDirectory, OneDriveManager.isVideoFile(itm.name) && !itm.isDirectory)
-            else -> Quadruple("", "", true, false)
+    val mediaItemsList = sortedItems.filter { itm ->
+        val (_, _, _, itIsVideo, itIsAudio) = when (itm) {
+            is SmbItem -> Quintuple(itm.name, itm.path, itm.isDirectory, SmbManager.isVideoFile(itm.name) && !itm.isDirectory, SmbManager.isAudioFile(itm.name) && !itm.isDirectory)
+            is WebDavItem -> Quintuple(itm.name, itm.href, itm.isDirectory, WebDavManager.isVideoFile(itm.name) && !itm.isDirectory, WebDavManager.isAudioFile(itm.name) && !itm.isDirectory)
+            is FtpItem -> Quintuple(itm.name, itm.path, itm.isDirectory, FtpManager.isVideoFile(itm.name) && !itm.isDirectory, FtpManager.isAudioFile(itm.name) && !itm.isDirectory)
+            is SftpItem -> Quintuple(itm.name, itm.path, itm.isDirectory, SftpManager.isVideoFile(itm.name) && !itm.isDirectory, SftpManager.isAudioFile(itm.name) && !itm.isDirectory)
+            is GoogleDriveItem -> Quintuple(itm.name, itm.id, itm.isDirectory, GoogleDriveManager.isVideoFile(itm.mimeType, itm.name) && !itm.isDirectory, GoogleDriveManager.isAudioFile(itm.mimeType, itm.name) && !itm.isDirectory)
+            is OneDriveItem -> Quintuple(itm.name, itm.downloadUrl ?: itm.id, itm.isDirectory, OneDriveManager.isVideoFile(itm.name) && !itm.isDirectory, OneDriveManager.isAudioFile(itm.name) && !itm.isDirectory)
+            else -> Quintuple("", "", true, false, false)
         }
-        itIsVideo
+        itIsVideo || itIsAudio
     }
-    val playlist = videoItemsList.map { itm ->
-        val (itName, itPath, _, _) = when (itm) {
-            is SmbItem -> Quadruple(itm.name, itm.path, itm.isDirectory, false)
-            is WebDavItem -> Quadruple(itm.name, itm.href, itm.isDirectory, false)
-            is FtpItem -> Quadruple(itm.name, itm.path, itm.isDirectory, false)
-            is SftpItem -> Quadruple(itm.name, itm.path, itm.isDirectory, false)
-            is GoogleDriveItem -> Quadruple(itm.name, itm.id, itm.isDirectory, false)
-            is OneDriveItem -> Quadruple(itm.name, itm.downloadUrl ?: itm.id, itm.isDirectory, false)
-            else -> Quadruple("", "", true, false)
+    val playlist = mediaItemsList.map { itm ->
+        val (itName, itPath, _, _, _) = when (itm) {
+            is SmbItem -> Quintuple(itm.name, itm.path, itm.isDirectory, false, false)
+            is WebDavItem -> Quintuple(itm.name, itm.href, itm.isDirectory, false, false)
+            is FtpItem -> Quintuple(itm.name, itm.path, itm.isDirectory, false, false)
+            is SftpItem -> Quintuple(itm.name, itm.path, itm.isDirectory, false, false)
+            is GoogleDriveItem -> Quintuple(itm.name, itm.id, itm.isDirectory, false, false)
+            is OneDriveItem -> Quintuple(itm.name, itm.downloadUrl ?: itm.id, itm.isDirectory, false, false)
+            else -> Quintuple("", "", true, false, false)
         }
         val itPlayUrl = when (credentials.type) {
             "WEBDAV" -> WebDavManager.buildAuthUrl(itPath, credentials.username, credentials.password)
@@ -930,7 +942,12 @@ private fun handleVideoClick(
             authSubUrl to sName.substringAfterLast(".", "").lowercase()
         } else null to null
         
-        PlaylistItem(videoUrl = itPlayUrl, title = itName, subtitleUrl = iSubUrl, subtitleExtension = iSubExt)
+        val itIsAudio = itName.lowercase().let { name ->
+            name.endsWith(".mp3") || name.endsWith(".flac") || name.endsWith(".ape") ||
+            name.endsWith(".m4a") || name.endsWith(".wav") || name.endsWith(".ogg") ||
+            name.endsWith(".aac")
+        }
+        PlaylistItem(videoUrl = itPlayUrl, title = itName, subtitleUrl = iSubUrl, subtitleExtension = iSubExt, isAudio = itIsAudio)
     }
     val currentIdx = playlist.indexOfFirst { it.videoUrl == targetPlayUrl }
 
@@ -975,6 +992,9 @@ private fun handleVideoClick(
 
 // 4개 요소를 가진 destructuring 헬퍼
 private data class Quadruple<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
+
+// 5개 요소를 가진 destructuring 헬퍼
+private data class Quintuple<A, B, C, D, E>(val a: A, val b: B, val c: C, val d: D, val e: E)
 
 private fun getTargetPlayUrl(item: Any, credentials: ServerCredentials): String {
     val path = when (item) {

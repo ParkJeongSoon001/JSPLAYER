@@ -29,6 +29,12 @@ object GoogleDriveManager {
         return listOf("mp4", "mkv", "avi", "mov", "ts", "wmv", "flv").contains(ext)
     }
 
+    fun isAudioFile(mimeType: String, name: String): Boolean {
+        if (mimeType.startsWith("audio/")) return true
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return listOf("mp3", "flac", "ape", "m4a", "wav", "ogg", "aac").contains(ext)
+    }
+
     private fun getDriveService(context: Context, account: GoogleSignInAccount): Drive {
         val credential = GoogleAccountCredential.usingOAuth2(
             context, listOf(DriveScopes.DRIVE_READONLY)
@@ -54,7 +60,9 @@ object GoogleDriveManager {
             val query = "'$folderId' in parents and trashed = false and " +
                     "(mimeType = 'application/vnd.google-apps.folder' or " +
                     "mimeType contains 'video/' or " +
-                    "name contains '.smi' or name contains '.srt' or name contains '.ass' or name contains '.vtt')"
+                    "mimeType contains 'audio/' or " +
+                    "name contains '.smi' or name contains '.srt' or name contains '.ass' or name contains '.vtt' or " +
+                    "name contains '.mp3' or name contains '.flac' or name contains '.ape' or name contains '.m4a' or name contains '.wav')"
             
             val result = driveService.files().list()
                 .setQ(query)

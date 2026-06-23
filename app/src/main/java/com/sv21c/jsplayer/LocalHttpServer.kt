@@ -786,6 +786,10 @@ class LocalHttpServer(
             lower.endsWith(".mp3") -> "audio/mpeg"
             lower.endsWith(".flac") -> "audio/flac"
             lower.endsWith(".wav") -> "audio/wav"
+            lower.endsWith(".ape") -> "audio/x-ape"
+            lower.endsWith(".m4a") -> "audio/mp4"
+            lower.endsWith(".ogg") -> "audio/ogg"
+            lower.endsWith(".aac") -> "audio/aac"
             else -> "video/mp4"
         }
     }

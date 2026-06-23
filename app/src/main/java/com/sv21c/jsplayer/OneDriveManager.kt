@@ -36,6 +36,8 @@ object OneDriveManager {
 
     // 지원하는 동영상 확장자
     private val VIDEO_EXTENSIONS = listOf("mp4", "mkv", "avi", "mov", "ts", "wmv", "flv", "webm", "m4v")
+    // 지원하는 오디오 확장자
+    private val AUDIO_EXTENSIONS = listOf("mp3", "flac", "ape", "m4a", "wav", "ogg", "aac")
     // 지원하는 자막 확장자
     private val SUBTITLE_EXTENSIONS = listOf("smi", "srt", "ass", "vtt", "ssa", "sub", "txt")
 
@@ -44,9 +46,19 @@ object OneDriveManager {
         return VIDEO_EXTENSIONS.contains(ext)
     }
 
+    fun isAudioFile(name: String): Boolean {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return AUDIO_EXTENSIONS.contains(ext)
+    }
+
     fun isVideoOrSubtitleFile(name: String): Boolean {
         val ext = name.substringAfterLast('.', "").lowercase()
         return VIDEO_EXTENSIONS.contains(ext) || SUBTITLE_EXTENSIONS.contains(ext)
+    }
+
+    fun isVideoOrAudioOrSubtitleFile(name: String): Boolean {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return VIDEO_EXTENSIONS.contains(ext) || AUDIO_EXTENSIONS.contains(ext) || SUBTITLE_EXTENSIONS.contains(ext)
     }
 
     /**
@@ -105,8 +117,8 @@ object OneDriveManager {
                         ?: "application/octet-stream"
                 }
 
-                // 폴더이거나 비디오/자막 파일만 포함
-                if (isFolder || isVideoOrSubtitleFile(name)) {
+                // 폴더이거나 비디오/오디오/자막 파일만 포함
+                if (isFolder || isVideoOrAudioOrSubtitleFile(name)) {
                     items.add(
                         OneDriveItem(
                             id = id,

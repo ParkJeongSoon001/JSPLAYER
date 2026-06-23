@@ -142,4 +142,12 @@ object SettingsStore {
     fun savePlaybackSpeed(context: Context, speed: Float) {
         getPrefs(context).edit().putFloat("playback_speed", speed).apply()
     }
+
+    fun getSubtitleFont(context: Context): String? {
+        return getPrefs(context).getString("subtitle_font", null)
+    }
+
+    fun saveSubtitleFont(context: Context, font: String?) {
+        getPrefs(context).edit().putString("subtitle_font", font).apply()
+    }
 }

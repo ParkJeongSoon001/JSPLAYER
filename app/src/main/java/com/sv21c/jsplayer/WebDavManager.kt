@@ -137,6 +137,15 @@ object WebDavManager {
                lower.endsWith(".m2ts") || lower.endsWith(".webm")
     }
 
+    /** 오디오 확장자 여부 확인 */
+    fun isAudioFile(name: String): Boolean {
+        val lower = name.lowercase()
+        return lower.endsWith(".mp3") || lower.endsWith(".flac") ||
+               lower.endsWith(".ape") || lower.endsWith(".m4a") ||
+               lower.endsWith(".wav") || lower.endsWith(".ogg") ||
+               lower.endsWith(".aac")
+    }
+
     /** WebDAV HTTP URL에 Basic Auth 정보를 포함한 ExoPlayer 재생 가능 URL 반환 */
     fun buildAuthUrl(url: String, username: String, password: String): String {
         if (username.isBlank()) return url

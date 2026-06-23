@@ -133,7 +133,8 @@ sealed class ScreenState {
         val playlist: List<PlaylistItem> = emptyList(),
         val currentIndex: Int = -1,
         val ftpEncoding: String = "AUTO",
-        val httpHeaders: Map<String, String> = emptyMap()
+        val httpHeaders: Map<String, String> = emptyMap(),
+        val isAudio: Boolean = false
     ) : ScreenState()
 }
 
@@ -157,7 +158,8 @@ data class PlaylistItem(
     val videoUrl: String,
     val title: String,
     val subtitleUrl: String? = null,
-    val subtitleExtension: String? = null
+    val subtitleExtension: String? = null,
+    val isAudio: Boolean = false
 )
 
 class MainActivity : ComponentActivity() {
@@ -582,6 +584,10 @@ class MainActivity : ComponentActivity() {
 
                             android.util.Log.d("SubtitleSearch", "========================================")
 
+                            val lowerUrl = externalUri.toString().lowercase()
+                            val isAudio = lowerUrl.endsWith(".mp3") || lowerUrl.endsWith(".flac") || lowerUrl.endsWith(".ape") ||
+                                          lowerUrl.endsWith(".m4a") || lowerUrl.endsWith(".wav") || lowerUrl.endsWith(".ogg") ||
+                                          lowerUrl.endsWith(".aac")
                             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                                 screenState = ScreenState.Playing(
                                     videoUrl = externalUri.toString(),
@@ -589,7 +595,8 @@ class MainActivity : ComponentActivity() {
                                     subtitleUrl = localSubUrl,
                                     subtitleExtension = localSubExt,
                                     playlist = emptyList(),
-                                    currentIndex = -1
+                                    currentIndex = -1,
+                                    isAudio = isAudio
                                 )
                                 pendingVideoUri.value = null  // 소비 완료
                             }
@@ -1025,6 +1032,16 @@ class MainActivity : ComponentActivity() {
                                         } catch (_: Exception) { emptyMap() }
                                     } else emptyMap()
                                     
+                                    val isAudio = item.videoUrl.lowercase().let { url ->
+                                        url.endsWith(".mp3") || url.endsWith(".flac") || url.endsWith(".ape") ||
+                                        url.endsWith(".m4a") || url.endsWith(".wav") || url.endsWith(".ogg") ||
+                                        url.endsWith(".aac")
+                                    } || item.title.lowercase().let { title ->
+                                        title.endsWith(".mp3") || title.endsWith(".flac") || title.endsWith(".ape") ||
+                                        title.endsWith(".m4a") || title.endsWith(".wav") || title.endsWith(".ogg") ||
+                                        title.endsWith(".aac")
+                                    }
+
                                     // 즐겨찾기에서 재생 시 복귀 플래그 설정
                                     localBrowsingActiveMode = false
                                     browsingDeviceOverride = null
@@ -1049,7 +1066,8 @@ class MainActivity : ComponentActivity() {
                                                             subtitleUrl = odSubUrl,
                                                             subtitleExtension = item.subtitleExtension,
                                                             ftpEncoding = item.ftpEncoding,
-                                                            httpHeaders = headers
+                                                            httpHeaders = headers,
+                                                            isAudio = isAudio
                                                         )
                                                     } else {
                                                         android.widget.Toast.makeText(this@MainActivity, "OneDrive URL 발급 실패. 다시 로그인해주세요.", android.widget.Toast.LENGTH_SHORT).show()
@@ -1085,7 +1103,7 @@ class MainActivity : ComponentActivity() {
                                                             subtitleUrl = gdSubUrl,
                                                             subtitleExtension = item.subtitleExtension,
                                                             ftpEncoding = item.ftpEncoding,
-                                                            httpHeaders = authHeaders
+                                                            httpHeaders = authHeaders, isAudio = isAudio
                                                         )
                                                     } else {
                                                         android.widget.Toast.makeText(this@MainActivity, "Google Drive 인증 실패. 다시 로그인해주세요.", android.widget.Toast.LENGTH_SHORT).show()
@@ -1104,7 +1122,7 @@ class MainActivity : ComponentActivity() {
                                                 subtitleUrl = item.subtitleUrl,
                                                 subtitleExtension = item.subtitleExtension,
                                                 ftpEncoding = item.ftpEncoding,
-                                                httpHeaders = headers
+                                                httpHeaders = headers, isAudio = isAudio
                                             )
                                         }
                                     }
@@ -1206,6 +1224,7 @@ class MainActivity : ComponentActivity() {
                                     } else if (item is Item) {
                                         val resources = item.resources
                                         val videoRes = resources.find { it.protocolInfo.contentFormat.startsWith("video/") || it.protocolInfo.contentFormat.startsWith("audio/") } ?: item.firstResource
+                                         val isAudioItem = videoRes?.protocolInfo?.contentFormat?.startsWith("audio/") == true || item.clazz?.value?.startsWith("object.item.audioItem") == true
                                         
                                         var subResUrl: String? = null
                                         var subResExt: String? = null
@@ -1431,6 +1450,7 @@ class MainActivity : ComponentActivity() {
                                                     }
                                                     val playlist = videoItems.map { vi ->
                                                         val vRes = vi.resources.find { r -> r.protocolInfo.contentFormat.startsWith("video/") || r.protocolInfo.contentFormat.startsWith("audio/") } ?: vi.firstResource
+                                                         val isAudioVi = vRes?.protocolInfo?.contentFormat?.startsWith("audio/") == true || vi.clazz?.value?.startsWith("object.item.audioItem") == true
                                                         
                                                         // FIND SUBTITLE FOR THIS `vi`
                                                         var viSubResUrl: String? = null
@@ -1491,7 +1511,7 @@ class MainActivity : ComponentActivity() {
                                                             videoUrl = vRes?.value ?: "",
                                                             title = vi.title ?: "Unknown",
                                                             subtitleUrl = viSubResUrl,
-                                                            subtitleExtension = viSubResExt
+                                                            subtitleExtension = viSubResExt, isAudio = isAudioVi
                                                         )
                                                     }
                                                     val playlistIndex = playlist.indexOfFirst { it.videoUrl == url }
@@ -1502,7 +1522,7 @@ class MainActivity : ComponentActivity() {
                                                         subtitleUrl = finalUrlToPass,
                                                         subtitleExtension = finalExtToPass,
                                                         playlist = playlist,
-                                                        currentIndex = playlistIndex
+                                                        currentIndex = playlistIndex, isAudio = isAudioItem
                                                     )
                                                 }
                                             }
@@ -1538,7 +1558,11 @@ class MainActivity : ComponentActivity() {
                                             videoUrl = v.uri.toString(),
                                             title = v.title,
                                             subtitleUrl = null,
-                                            subtitleExtension = null
+                                            subtitleExtension = null, isAudio = v.title.lowercase().let { name ->
+                                                name.endsWith(".mp3") || name.endsWith(".flac") || name.endsWith(".ape") ||
+                                                name.endsWith(".m4a") || name.endsWith(".wav") || name.endsWith(".ogg") ||
+                                                name.endsWith(".aac")
+                                            }
                                         )
                                     }
                                     
@@ -1658,7 +1682,11 @@ class MainActivity : ComponentActivity() {
                                                 subtitleUrl = localSubUrl,
                                                 subtitleExtension = localSubExt,
                                                 playlist = playlist,
-                                                currentIndex = index
+                                                currentIndex = index, isAudio = videoItem.title.lowercase().let { name ->
+                                                     name.endsWith(".mp3") || name.endsWith(".flac") || name.endsWith(".ape") ||
+                                                     name.endsWith(".m4a") || name.endsWith(".wav") || name.endsWith(".ogg") ||
+                                                     name.endsWith(".aac")
+                                                 }
                                             )
                                         }
                                     }
@@ -1734,18 +1762,25 @@ class MainActivity : ComponentActivity() {
                                     screenState = ScreenState.NetworkBrowsing(state.credentials, path, name)
                                 },
                                 onVideoClick = { url, title, subUrl, subExt, playlist, currentIndex, httpHeaders ->
-                                    networkBrowsingCredentials = state.credentials
-                                    screenState = ScreenState.Playing(
-                                        videoUrl = url,
-                                        title = title,
-                                        subtitleUrl = subUrl,
-                                        subtitleExtension = subExt,
-                                        playlist = playlist,
-                                        currentIndex = currentIndex,
-                                        ftpEncoding = if (state.credentials.type == "FTP") state.credentials.encoding else "AUTO",
-                                        httpHeaders = httpHeaders
-                                    )
-                                }
+                                     networkBrowsingCredentials = state.credentials
+                                     val isAudioItem = playlist.getOrNull(currentIndex)?.isAudio == true ||
+                                                       url.lowercase().let { u ->
+                                                           u.endsWith(".mp3") || u.endsWith(".flac") || u.endsWith(".ape") ||
+                                                           u.endsWith(".m4a") || u.endsWith(".wav") || u.endsWith(".ogg") ||
+                                                           u.endsWith(".aac")
+                                                       }
+                                     screenState = ScreenState.Playing(
+                                         videoUrl = url,
+                                         title = title,
+                                         subtitleUrl = subUrl,
+                                         subtitleExtension = subExt,
+                                         playlist = playlist,
+                                         currentIndex = currentIndex,
+                                         ftpEncoding = if (state.credentials.type == "FTP") state.credentials.encoding else "AUTO",
+                                         httpHeaders = httpHeaders,
+                                         isAudio = isAudioItem
+                                     )
+                                 }
                             )
                         }
                         is ScreenState.Playing -> {
@@ -1758,7 +1793,7 @@ class MainActivity : ComponentActivity() {
                                     title = state.title,
                                     isControlVisible = isVideoControlVisible,
                                     onControlVisibilityChange = { isVideoControlVisible = it },
-                                    httpHeaders = state.httpHeaders,
+                                    httpHeaders = state.httpHeaders, isAudio = state.isAudio,
                                     onClose = {
                                         isVideoControlVisible = true // 다음 재생 시 초기화
                                         if (favoritesActiveMode) {
@@ -2741,7 +2776,7 @@ fun VideoPlayerScreen(
     onCastResume: () -> Unit = {},
     onCastSeek: (Long) -> Unit = {},
     onSearchRenderers: () -> Unit = {}
-) {
+, isAudio: Boolean = false) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val activity = context as? android.app.Activity
     val mainActivity = context as? com.sv21c.jsplayer.MainActivity
@@ -3530,9 +3565,23 @@ fun VideoPlayerScreen(
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                         android.util.Log.e("ExoPlayer_Debug", "❌ Player Error: ${error.message} (code=${error.errorCode})", error)
                         
-                        // 디코딩 실패 시 실패 디코더를 블랙리스트에 추가하고 단계적 자동 재시도
-                        // 최대 4회 재시도하여 기기의 모든 사용 가능한 디코더를 순차 시도
-                        if (ffmpegFallbackRetry < 4 && 
+                        val isAudioFile = isAudio || 
+                            videoUrl.lowercase().let { url ->
+                                url.endsWith(".mp3") || url.endsWith(".flac") || url.endsWith(".ape") ||
+                                url.endsWith(".m4a") || url.endsWith(".wav") || url.endsWith(".ogg") ||
+                                url.endsWith(".aac")
+                            } || 
+                            title.lowercase().let { name ->
+                                name.endsWith(".mp3") || name.endsWith(".flac") || name.endsWith(".ape") ||
+                                name.endsWith(".m4a") || name.endsWith(".wav") || name.endsWith(".ogg") ||
+                                name.endsWith(".aac")
+                            }
+
+                        // 오디오 파일 재생 에러 발생 시에는 즉시 VLC 폴백으로 유도
+                        if (isAudioFile) {
+                            android.util.Log.e("ExoPlayer_Debug", "🎵 오디오 재생 실패 (에러코드: ${error.errorCode}). 즉시 VLC로 폴백합니다.")
+                            useVlcFallback = true
+                        } else if (ffmpegFallbackRetry < 4 && 
                             (error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED ||
                              error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED)) {
                             val nextRetry = ffmpegFallbackRetry + 1
@@ -3569,6 +3618,26 @@ fun VideoPlayerScreen(
             }
     }
 
+    // --- VLC 폴백 재생 제어 ---
+    LaunchedEffect(videoUrl, useVlcFallback, savedPositionForRetry) {
+        if (useVlcFallback) {
+            exoPlayer.pause()
+            val savedPos = PlaybackPositionStore.getPosition(context, videoUrl)
+            val vlcStartPosition = if (savedPositionForRetry > 0L) savedPositionForRetry else savedPos
+            vlcPlayer.setSpeed(currentSpeed)
+            // VLC는 자체적으로 URL을 처리하므로 원본 URL 그대로 전달
+            // getSafeEncodedUrl()을 사용하면 경로의 '='가 '%3D'로 인코딩되어 DLNA 서버가 인식 불가
+            android.util.Log.i("ExoPlayer_Debug", "🎵 VLC에 원본 URL 전달: $videoUrl")
+            vlcPlayer.prepare(android.net.Uri.parse(videoUrl), vlcStartPosition)
+        }
+    }
+
+    LaunchedEffect(finalSubtitleUrl, useVlcFallback) {
+        if (useVlcFallback) {
+            android.util.Log.i("ExoPlayer_Debug", "ℹ️ VLC 자체 자막 로드를 건너뛰고 Compose Subtitle Overlay를 활성화합니다. URL: $finalSubtitleUrl")
+        }
+    }
+
     // --- 비동기 미디어 로딩 및 재생 제어 ---
     LaunchedEffect(isSubReady, ffmpegFallbackRetry) {
         if (!isSubReady) return@LaunchedEffect
@@ -3580,6 +3649,17 @@ fun VideoPlayerScreen(
             if (ext in setOf("avi", "divx", "xvid")) {
                 android.util.Log.i("ExoPlayer_Debug",
                     "📹 AVI 파일 감지 ($ext) → ExoPlayer 건너뛰고 VLC 즉시 사용")
+                useVlcFallback = true
+                return@LaunchedEffect
+            }
+            // ── 오디오 파일 조기 감지 → VLC 즉시 전환 ──────────────────────
+            // DLNA 트랜스코더 URL은 확장자로 판별 불가하므로 isAudio(UPnP Class) + 타이틀 확장자 모두 검사
+            val audioExts = setOf("mp3", "flac", "ape", "m4a", "wav", "ogg", "aac", "wma", "alac", "aiff", "dsf", "dff")
+            val titleExt = title.substringAfterLast('.', "").lowercase()
+            val isAudioDetected = isAudio || ext in audioExts || titleExt in audioExts
+            if (isAudioDetected) {
+                android.util.Log.i("ExoPlayer_Debug",
+                    "🎵 오디오 파일 감지 (isAudio=$isAudio, ext=$ext, titleExt=$titleExt) → ExoPlayer 건너뛰고 VLC 즉시 사용")
                 useVlcFallback = true
                 return@LaunchedEffect
             }
@@ -4466,89 +4546,99 @@ fun VideoPlayerScreen(
     ) {
         // --- Video surface ---
         val useTextureView = remember { SettingsStore.getUseTextureView(context) }
-
-        if (!isSubReady) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.7f)),
-                contentAlignment = androidx.compose.ui.Alignment.Center
-            ) {
-                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+        val isAudioFile = remember(videoUrl, isAudio) {
+            isAudio || 
+            videoUrl.lowercase().let { url ->
+                url.endsWith(".mp3") || url.endsWith(".flac") || url.endsWith(".ape") ||
+                url.endsWith(".m4a") || url.endsWith(".wav") || url.endsWith(".ogg") ||
+                url.endsWith(".aac")
+            } || 
+            title.lowercase().let { name ->
+                name.endsWith(".mp3") || name.endsWith(".flac") || name.endsWith(".ape") ||
+                name.endsWith(".m4a") || name.endsWith(".wav") || name.endsWith(".ogg") ||
+                name.endsWith(".aac")
             }
         }
-        AndroidView(
-            factory = { ctx ->
-                val playerView = if (useTextureView) {
-                    android.view.LayoutInflater.from(ctx).inflate(R.layout.player_view_texture, null) as androidx.media3.ui.PlayerView
-                } else {
-                    androidx.media3.ui.PlayerView(ctx)
+
+        if (isAudioFile && !useVlcFallback) {
+            AudioPlayerOverlay(
+                modifier = Modifier.fillMaxSize(),
+                audioUrl = videoUrl,
+                title = title,
+                player = exoPlayer,
+                vlcPlayer = null,
+                useVlcFallback = false
+            )
+        } else if (!isAudioFile) {
+            if (!isSubReady) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.7f)),
+                    contentAlignment = androidx.compose.ui.Alignment.Center
+                ) {
+                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                 }
-                
-                playerView.apply {
-                    player = exoPlayer
-                    useController = false // Use custom TV controller
-                    keepScreenOn = true // 재생 중 화면 꺼짐 방지
-                    subtitleView?.setStyle(
-                        androidx.media3.ui.CaptionStyleCompat(
-                            android.graphics.Color.WHITE,
-                            android.graphics.Color.TRANSPARENT,
-                            android.graphics.Color.TRANSPARENT,
-                            androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW,
-                            android.graphics.Color.BLACK,
-                            null
+            }
+            AndroidView(
+                factory = { ctx ->
+                    val playerView = if (useTextureView) {
+                        android.view.LayoutInflater.from(ctx).inflate(R.layout.player_view_texture, null) as androidx.media3.ui.PlayerView
+                    } else {
+                        androidx.media3.ui.PlayerView(ctx)
+                    }
+                    
+                    playerView.apply {
+                        player = exoPlayer
+                        useController = false // Use custom TV controller
+                        keepScreenOn = true // 재생 중 화면 꺼짐 방지
+                        subtitleView?.setStyle(
+                            androidx.media3.ui.CaptionStyleCompat(
+                                android.graphics.Color.WHITE,
+                                android.graphics.Color.TRANSPARENT,
+                                android.graphics.Color.TRANSPARENT,
+                                androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW,
+                                android.graphics.Color.BLACK,
+                                null
+                            )
                         )
+                        exoPlayer.addListener(object : androidx.media3.common.Player.Listener {
+                            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                                android.util.Log.e("VideoPlayerScreen", "ExoPlayer Error: ${error.errorCode} ${error.message}", error)
+                            }
+                            
+                            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                                videoSizeState = videoSize
+                            }
+                        })
+                    }
+                },
+                update = { playerView ->
+                    playerView.subtitleView?.setFractionalTextSize(
+                        androidx.media3.ui.SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * subtitleScale
                     )
-                    exoPlayer.addListener(object : androidx.media3.common.Player.Listener {
-                        override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                            android.util.Log.e("VideoPlayerScreen", "ExoPlayer Error: ${error.errorCode} ${error.message}", error)
-                        }
-                        
-                        override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
-                            videoSizeState = videoSize
-                        }
-                    })
-                }
-            },
-            update = { playerView ->
-                playerView.subtitleView?.setFractionalTextSize(
-                    androidx.media3.ui.SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * subtitleScale
-                )
-                
-                val showOverlay = isControlVisible && (mainActivity?.isInPipMode?.value != true)
-                playerView.subtitleView?.setBottomPaddingFraction(
-                    if (showOverlay) 0.40f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION
-                )
-            },
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    scaleX = zoomScale
-                    scaleY = zoomScale
-                    translationX = zoomOffsetX
-                    translationY = zoomOffsetY
-                }
-        )
+                    
+                    val showOverlay = isControlVisible && (mainActivity?.isInPipMode?.value != true)
+                    playerView.subtitleView?.setBottomPaddingFraction(
+                        if (showOverlay) 0.40f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = zoomScale
+                        scaleY = zoomScale
+                        translationX = zoomOffsetX
+                        translationY = zoomOffsetY
+                    }
+            )
+        }
 
         // ── VLC LibVLC 폴백 플레이어 ─────────────────────────────────
         // AVI+Xvid/DivX 파일은 VLC가 직접 재생
         // surfaceChanged에서 실제 화면 크기를 받은 후 재생 시작 → 전체 화면 보장
         if (useVlcFallback) {
             exoPlayer.pause()
-            LaunchedEffect(videoUrl) {
-                val savedPos = PlaybackPositionStore.getPosition(context, videoUrl)
-                val vlcStartPosition = if (savedPositionForRetry > 0L) savedPositionForRetry else savedPos
-                // URI 준비 (Surface 준비되면 실제 재생 시작) - 한글/공백 안전 인코딩 적용
-                val encodedVideoUrl = getSafeEncodedUrl(videoUrl)
-                vlcPlayer.setSpeed(currentSpeed)
-                vlcPlayer.prepare(android.net.Uri.parse(encodedVideoUrl), vlcStartPosition)
-            }
-
-            LaunchedEffect(finalSubtitleUrl) {
-                // VLC 자체 자막 추가(Freetype 폰트 버그 유발)를 비활성화하고, Compose Subtitle Overlay로 대체 처리합니다.
-                android.util.Log.i("ExoPlayer_Debug", "ℹ️ VLC 자체 자막 로드를 건너뛰고 Compose Subtitle Overlay를 활성화합니다. URL: $finalSubtitleUrl")
-            }
-
             Box(modifier = Modifier.fillMaxSize()) {
                 AndroidView(
                     factory = { ctx ->
@@ -4579,6 +4669,18 @@ fun VideoPlayerScreen(
                         vlcPlayer = vlcPlayer,
                         subtitleScale = subtitleScale,
                         subtitleOffsetMs = subtitleOffsetMs
+                    )
+                }
+
+                // 오디오 파일인 경우 VLC SurfaceView 위에 덮어씌움
+                if (isAudioFile) {
+                    AudioPlayerOverlay(
+                        modifier = Modifier.fillMaxSize(),
+                        audioUrl = videoUrl,
+                        title = title,
+                        player = null,
+                        vlcPlayer = vlcPlayer,
+                        useVlcFallback = true
                     )
                 }
             }

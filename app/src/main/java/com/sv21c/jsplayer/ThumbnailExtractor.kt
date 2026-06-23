@@ -77,4 +77,65 @@ object ThumbnailExtractor {
             null
         }
     }
+
+    suspend fun extractAlbumArtUri(context: Context, audioUrl: String): Uri? {
+        return withContext(Dispatchers.IO) {
+            var retriever: MediaMetadataRetriever? = null
+            try {
+                val uri = Uri.parse(audioUrl)
+                val scheme = uri.scheme?.lowercase() ?: ""
+
+                // 네트워크 주소인 경우 썸네일 추출 생략 (로딩 지연 및 크래시 방지)
+                if (scheme == "smb" || scheme == "ftp" || scheme == "sftp" || scheme.startsWith("http")) {
+                    return@withContext null
+                }
+
+                retriever = MediaMetadataRetriever()
+                if (scheme == "content") {
+                    retriever.setDataSource(context, uri)
+                } else {
+                    val path = if (scheme == "file") uri.path else audioUrl
+                    path?.let { retriever.setDataSource(it) } ?: return@withContext null
+                }
+
+                val artBytes = retriever.embeddedPicture
+                if (artBytes != null) {
+                    val rawBitmap = android.graphics.BitmapFactory.decodeByteArray(artBytes, 0, artBytes.size)
+                    if (rawBitmap != null) {
+                        var width = rawBitmap.width
+                        var height = rawBitmap.height
+                        val maxSide = 512
+                        
+                        val b: Bitmap = if (width > maxSide || height > maxSide) {
+                            val ratio = maxOf(width.toFloat() / maxSide, height.toFloat() / maxSide)
+                            width = (width / ratio).toInt()
+                            height = (height / ratio).toInt()
+                            Bitmap.createScaledBitmap(rawBitmap, width, height, true)
+                        } else {
+                            rawBitmap
+                        }
+
+                        val cacheDir = File(context.cacheDir, "album_arts").apply { mkdirs() }
+                        val fileName = "art_${audioUrl.hashCode()}.jpg"
+                        val artFile = File(cacheDir, fileName)
+                        java.io.FileOutputStream(artFile).use { out ->
+                            b.compress(Bitmap.CompressFormat.JPEG, 85, out)
+                        }
+                        
+                        if (b != rawBitmap) b.recycle()
+                        rawBitmap.recycle()
+                        
+                        return@withContext Uri.fromFile(artFile)
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("ThumbnailExtractor", "Failed to extract album art: ${e.message}")
+            } finally {
+                try {
+                    retriever?.release()
+                } catch (e: Exception) {}
+            }
+            null
+        }
+    }
 }

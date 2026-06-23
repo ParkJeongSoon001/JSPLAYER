@@ -637,6 +637,15 @@ object FtpManager {
                lower.endsWith(".wmv") || lower.endsWith(".flv") ||
                lower.endsWith(".m4v") || lower.endsWith(".ts") ||
                lower.endsWith(".m2ts") || lower.endsWith(".webm")
+     }
+
+    /** 오디오 확장자 여부 확인 */
+    fun isAudioFile(name: String): Boolean {
+        val lower = name.lowercase()
+        return lower.endsWith(".mp3") || lower.endsWith(".flac") ||
+               lower.endsWith(".ape") || lower.endsWith(".m4a") ||
+               lower.endsWith(".wav") || lower.endsWith(".ogg") ||
+               lower.endsWith(".aac")
     }
 
     // ─── 인코딩 자동 감지 헬퍼 함수들 ───────────────────────────────────
