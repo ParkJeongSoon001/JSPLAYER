@@ -701,6 +701,8 @@ private fun handleVideoClick(
     coroutineScope: kotlinx.coroutines.CoroutineScope,
     onVideoClick: (url: String, title: String, subUrl: String?, subExt: String?, playlist: List<PlaylistItem>, currentIndex: Int, httpHeaders: Map<String, String>) -> Unit
 ) {
+    // ── 플레이리스트 구성 & 자막 매칭은 CPU 집약 작업이므로 백그라운드에서 실행 (ANR 방지) ──
+    coroutineScope.launch(kotlinx.coroutines.Dispatchers.Default) {
     val path = when (item) {
         is SmbItem -> item.path
         is WebDavItem -> item.href
@@ -738,35 +740,45 @@ private fun handleVideoClick(
             else -> path
         }
     }
-    
-    val nameWithoutExt = name.substringBeforeLast(".")
-    val subItem = sortedItems.find { itItem ->
-        val (itName, _, itIsDir) = when (itItem) {
-            is SmbItem -> Triple(itItem.name, itItem.path, itItem.isDirectory)
-            is WebDavItem -> Triple(itItem.name, itItem.href, itItem.isDirectory)
-            is FtpItem -> Triple(itItem.name, itItem.path, itItem.isDirectory)
-            is SftpItem -> Triple(itItem.name, itItem.path, itItem.isDirectory)
-            is GoogleDriveItem -> Triple(itItem.name, itItem.id, itItem.isDirectory)
-            is OneDriveItem -> Triple(itItem.name, itItem.downloadUrl ?: itItem.id, itItem.isDirectory)
-            else -> Triple("", "", true)
-        }
-        if (itIsDir || itItem == item) false
-        else {
-            val ext = itName.substringAfterLast(".", "").lowercase()
-            val itBase = itName.substringBeforeLast(".")
-            (ext == "smi" || ext == "srt" || ext == "ass" || ext == "vtt" || ext == "ssa" || ext == "sub" || ext == "txt") &&
-            (itBase.equals(nameWithoutExt, ignoreCase = true) || (itBase.startsWith(nameWithoutExt, ignoreCase = true) && itBase.getOrNull(nameWithoutExt.length) == '.'))
+
+    // ── 자막 파일 사전 필터링 (O(N²) → O(N×S) 최적화, S = 자막 파일 수) ──
+    val subtitleExts = setOf("smi", "srt", "ass", "vtt", "ssa", "sub", "txt")
+    data class SubInfo(val item: Any, val name: String, val baseName: String, val ext: String)
+    val subtitleItems = sortedItems.mapNotNull { candItem ->
+        val candName = when (candItem) {
+            is SmbItem -> if (!candItem.isDirectory) candItem.name else null
+            is WebDavItem -> if (!candItem.isDirectory) candItem.name else null
+            is FtpItem -> if (!candItem.isDirectory) candItem.name else null
+            is SftpItem -> if (!candItem.isDirectory) candItem.name else null
+            is GoogleDriveItem -> if (!candItem.isDirectory) candItem.name else null
+            is OneDriveItem -> if (!candItem.isDirectory) candItem.name else null
+            else -> null
+        } ?: return@mapNotNull null
+        val ext = candName.substringAfterLast(".", "").lowercase()
+        if (ext in subtitleExts) SubInfo(candItem, candName, candName.substringBeforeLast("."), ext) else null
+    }
+
+    // 자막 매칭 헬퍼 (사전 필터링된 리스트에서 검색)
+    fun findMatchingSubtitle(mediaNameWithoutExt: String, mediaItem: Any): SubInfo? {
+        return subtitleItems.find { sub ->
+            sub.item != mediaItem &&
+            (sub.baseName.equals(mediaNameWithoutExt, ignoreCase = true) ||
+             (sub.baseName.startsWith(mediaNameWithoutExt, ignoreCase = true) && sub.baseName.getOrNull(mediaNameWithoutExt.length) == '.'))
         }
     }
 
+    // 선택된 파일의 자막 매칭
+    val nameWithoutExt = name.substringBeforeLast(".")
+    val subItem = findMatchingSubtitle(nameWithoutExt, item)
+
     val (subUrl, subExt) = if (subItem != null) {
-        val (sName, sPath, _) = when (subItem) {
-            is SmbItem -> Triple(subItem.name, subItem.path, subItem.isDirectory)
-            is WebDavItem -> Triple(subItem.name, subItem.href, subItem.isDirectory)
-            is FtpItem -> Triple(subItem.name, subItem.path, subItem.isDirectory)
-            is SftpItem -> Triple(subItem.name, subItem.path, subItem.isDirectory)
-            is GoogleDriveItem -> Triple(subItem.name, subItem.id, subItem.isDirectory)
-            is OneDriveItem -> Triple(subItem.name, subItem.downloadUrl ?: subItem.id, subItem.isDirectory)
+        val (sName, sPath, _) = when (subItem.item) {
+            is SmbItem -> Triple(subItem.name, (subItem.item as SmbItem).path, false)
+            is WebDavItem -> Triple(subItem.name, (subItem.item as WebDavItem).href, false)
+            is FtpItem -> Triple(subItem.name, (subItem.item as FtpItem).path, false)
+            is SftpItem -> Triple(subItem.name, (subItem.item as SftpItem).path, false)
+            is GoogleDriveItem -> Triple(subItem.name, (subItem.item as GoogleDriveItem).id, false)
+            is OneDriveItem -> Triple(subItem.name, (subItem.item as OneDriveItem).let { it.downloadUrl ?: it.id }, false)
             else -> Triple("", "", true)
         }
         val authSubUrl = when (credentials.type) {
@@ -798,7 +810,6 @@ private fun handleVideoClick(
                 GoogleDriveManager.getStreamUrl(sPath)
             }
             "ONEDRIVE" -> {
-                // If it's a downloadUrl (starts with http), use it directly. Otherwise use getStreamUrl
                 if (sPath.startsWith("http")) sPath else OneDriveManager.getStreamUrl(sPath)
             }
             else -> sPath
@@ -863,52 +874,21 @@ private fun handleVideoClick(
             else -> itPath
         }
         
+        // 자막 매칭 (사전 필터링된 리스트 사용)
         val iNameWithoutExt = itName.substringBeforeLast(".")
-        val iSubItem = sortedItems.find { candItem ->
-            val candName = when(candItem) {
-                is SmbItem -> candItem.name
-                is WebDavItem -> candItem.name
-                is FtpItem -> candItem.name
-                is SftpItem -> candItem.name
-                is GoogleDriveItem -> candItem.name
-                is OneDriveItem -> candItem.name
-                else -> ""
-            }
-            val candIsDir = when(candItem) {
-                is SmbItem -> candItem.isDirectory
-                is WebDavItem -> candItem.isDirectory
-                is FtpItem -> candItem.isDirectory
-                is SftpItem -> candItem.isDirectory
-                is GoogleDriveItem -> candItem.isDirectory
-                is OneDriveItem -> candItem.isDirectory
-                else -> true
-            }
-            if (candIsDir || candItem == itm) false else {
-                val ext = candName.substringAfterLast(".", "").lowercase()
-                val candBase = candName.substringBeforeLast(".")
-                (ext == "smi" || ext == "srt" || ext == "ass" || ext == "vtt" || ext == "ssa" || ext == "sub" || ext == "txt") &&
-                (candBase.equals(iNameWithoutExt, ignoreCase = true) || (candBase.startsWith(iNameWithoutExt, ignoreCase = true) && candBase.getOrNull(iNameWithoutExt.length) == '.'))
-            }
-        }
-        val (iSubUrl, iSubExt) = if (iSubItem != null) {
-                val sPath = when(iSubItem) {
-                    is SmbItem -> iSubItem.path
-                    is WebDavItem -> iSubItem.href
-                    is FtpItem -> iSubItem.path
-                    is SftpItem -> iSubItem.path
-                    is GoogleDriveItem -> iSubItem.id
-                    is OneDriveItem -> iSubItem.downloadUrl ?: iSubItem.id
+        val iSubMatch = findMatchingSubtitle(iNameWithoutExt, itm)
+
+        val (iSubUrl, iSubExt) = if (iSubMatch != null) {
+                val sPath = when(iSubMatch.item) {
+                    is SmbItem -> (iSubMatch.item as SmbItem).path
+                    is WebDavItem -> (iSubMatch.item as WebDavItem).href
+                    is FtpItem -> (iSubMatch.item as FtpItem).path
+                    is SftpItem -> (iSubMatch.item as SftpItem).path
+                    is GoogleDriveItem -> (iSubMatch.item as GoogleDriveItem).id
+                    is OneDriveItem -> (iSubMatch.item as OneDriveItem).let { it.downloadUrl ?: it.id }
                     else -> ""
                 }
-                val sName = when(iSubItem) {
-                    is SmbItem -> iSubItem.name
-                    is WebDavItem -> iSubItem.name
-                    is FtpItem -> iSubItem.name
-                    is SftpItem -> iSubItem.name
-                    is GoogleDriveItem -> iSubItem.name
-                    is OneDriveItem -> iSubItem.name
-                    else -> ""
-                }
+                val sName = iSubMatch.name
                 val authSubUrl = when (credentials.type) {
                     "WEBDAV" -> WebDavManager.buildAuthUrl(sPath, credentials.username, credentials.password)
                     "SMB" -> if (credentials.username.isNotBlank()) sPath.replaceFirst("smb://", "smb://${android.net.Uri.encode(credentials.username)}:${android.net.Uri.encode(credentials.password)}@") else sPath
@@ -942,52 +922,51 @@ private fun handleVideoClick(
             authSubUrl to sName.substringAfterLast(".", "").lowercase()
         } else null to null
         
-        val itIsAudio = itName.lowercase().let { name ->
-            name.endsWith(".mp3") || name.endsWith(".flac") || name.endsWith(".ape") ||
-            name.endsWith(".m4a") || name.endsWith(".wav") || name.endsWith(".ogg") ||
-            name.endsWith(".aac")
+        val itIsAudio = itName.lowercase().let { n ->
+            n.endsWith(".mp3") || n.endsWith(".flac") || n.endsWith(".ape") ||
+            n.endsWith(".m4a") || n.endsWith(".wav") || n.endsWith(".ogg") ||
+            n.endsWith(".aac")
         }
         PlaylistItem(videoUrl = itPlayUrl, title = itName, subtitleUrl = iSubUrl, subtitleExtension = iSubExt, isAudio = itIsAudio)
     }
     val currentIdx = playlist.indexOfFirst { it.videoUrl == targetPlayUrl }
 
+    // ── 최종 콜백은 메인 스레드에서 실행 ──
     if (credentials.type == "GOOGLE_DRIVE") {
-        coroutineScope.launch(Dispatchers.IO) {
-            val account = kotlinx.coroutines.withContext(Dispatchers.Main) { GoogleDriveAuthManager.getSignedInAccount(context) }
-            val token = if (account != null) GoogleDriveManager.getAccessToken(context, account) else null
-            val httpHeaders = if (token != null) mapOf("Authorization" to "Bearer $token") else emptyMap()
-            
-            withContext(Dispatchers.Main) {
-                onVideoClick(targetPlayUrl, name, subUrl, subExt, playlist, currentIdx, httpHeaders)
-            }
+        val account = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { GoogleDriveAuthManager.getSignedInAccount(context) }
+        val token = if (account != null) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { GoogleDriveManager.getAccessToken(context, account) }
+        } else null
+        val httpHeaders = if (token != null) mapOf("Authorization" to "Bearer $token") else emptyMap()
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+            onVideoClick(targetPlayUrl, name, subUrl, subExt, playlist, currentIdx, httpHeaders)
         }
     } else if (credentials.type == "ONEDRIVE") {
-        coroutineScope.launch(Dispatchers.IO) {
-            val token = OneDriveAuthManager.getAccessToken()
-            var finalPlayUrl = targetPlayUrl
-            var httpHeaders = emptyMap<String, String>()
-            
-            if (targetPlayUrl.startsWith("https://graph.microsoft.com")) {
-                val fileId = (item as? OneDriveItem)?.id
-                if (fileId != null) {
-                    val directUrl = OneDriveManager.getDirectDownloadUrl(fileId)
-                    if (directUrl != null) {
-                        finalPlayUrl = directUrl
-                    } else if (token != null) {
-                        httpHeaders = mapOf("Authorization" to "Bearer $token")
-                    }
+        val token = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { OneDriveAuthManager.getAccessToken() }
+        var finalPlayUrl = targetPlayUrl
+        var httpHeaders = emptyMap<String, String>()
+        if (targetPlayUrl.startsWith("https://graph.microsoft.com")) {
+            val fileId = (item as? OneDriveItem)?.id
+            if (fileId != null) {
+                val directUrl = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { OneDriveManager.getDirectDownloadUrl(fileId) }
+                if (directUrl != null) {
+                    finalPlayUrl = directUrl
                 } else if (token != null) {
                     httpHeaders = mapOf("Authorization" to "Bearer $token")
                 }
-            }
-            
-            withContext(Dispatchers.Main) {
-                onVideoClick(finalPlayUrl, name, subUrl, subExt, playlist, currentIdx, httpHeaders)
+            } else if (token != null) {
+                httpHeaders = mapOf("Authorization" to "Bearer $token")
             }
         }
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+            onVideoClick(finalPlayUrl, name, subUrl, subExt, playlist, currentIdx, httpHeaders)
+        }
     } else {
-        onVideoClick(targetPlayUrl, name, subUrl, subExt, playlist, currentIdx, emptyMap())
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+            onVideoClick(targetPlayUrl, name, subUrl, subExt, playlist, currentIdx, emptyMap())
+        }
     }
+    } // end coroutineScope.launch
 }
 
 // 4개 요소를 가진 destructuring 헬퍼
