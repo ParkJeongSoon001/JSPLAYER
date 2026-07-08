@@ -52,6 +52,8 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.ui.PlayerView
 import com.sv21c.jsplayer.ui.theme.JSPLAYERTheme
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -66,6 +68,11 @@ import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import org.jupnp.model.meta.Device
 import android.util.Log
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import android.media.MediaScannerConnection
+import android.widget.Toast
+import android.app.RecoverableSecurityException
 import androidx.activity.compose.BackHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -6510,7 +6517,7 @@ fun java.io.InputStream.readBytesWithLimit(limit: Int = 10 * 1024 * 1024): ByteA
     return out.toByteArray()
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun LocalBrowserScreen(
     padding: PaddingValues,
@@ -6532,7 +6539,28 @@ fun LocalBrowserScreen(
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
     
+    var selectedVideoForAction by remember { mutableStateOf<LocalVideoItem?>(null) }
+    var showActionDialog by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
+    var renameInputText by remember { mutableStateOf("") }
+    var refreshTrigger by remember { mutableStateOf(0) }
+    
     val context = androidx.compose.ui.platform.LocalContext.current
+    var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val writePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            pendingAction?.invoke()
+            pendingAction = null
+        } else {
+            Toast.makeText(context, "작업 권한이 거부되었습니다.", Toast.LENGTH_SHORT).show()
+            pendingAction = null
+        }
+    }
+    
+    val coroutineScope = rememberCoroutineScope()
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
 
     val showListPlayHistory = SettingsStore.getShowListPlayHistory(context)
@@ -6582,7 +6610,7 @@ fun LocalBrowserScreen(
         }
     }
 
-    LaunchedEffect(sortOrder) {
+    LaunchedEffect(sortOrder, refreshTrigger) {
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
                 isLoading = true
@@ -6908,7 +6936,14 @@ fun LocalBrowserScreen(
                                         true
                                     } else false
                                 }
-                                .clickable { onItemClick(video, index, displayVideos) }
+                                .combinedClickable(
+                                    onClick = { onItemClick(video, index, displayVideos) },
+                                    onLongClick = {
+                                        selectedVideoForAction = video
+                                        renameInputText = video.title
+                                        showActionDialog = true
+                                    }
+                                )
                                 .border(
                                     width = if (isTvMode && isFocused) 3.dp else 0.dp,
                                     color = if (isTvMode && isFocused) PrimaryColor else Color.Transparent,
@@ -7029,6 +7064,226 @@ fun LocalBrowserScreen(
                 }
             }
         }
+    }
+
+    fun getMimeTypeFromExtension(ext: String): String {
+        return android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.lowercase())
+            ?: "video/*"
+    }
+
+    fun renameFile(video: LocalVideoItem, newName: String) {
+        val action: () -> Unit = {
+            coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val newFileName = newName
+                    val ext = newFileName.substringAfterLast(".", "")
+                    val values = android.content.ContentValues().apply {
+                        put(android.provider.MediaStore.Video.Media.DISPLAY_NAME, newFileName)
+                        if (ext.isNotEmpty()) {
+                            put(android.provider.MediaStore.Video.Media.MIME_TYPE, getMimeTypeFromExtension(ext))
+                        }
+                    }
+                    val rowsUpdated = context.contentResolver.update(video.uri, values, null, null)
+                    if (rowsUpdated > 0) {
+                        val oldPath = video.path
+                        if (oldPath != null) {
+                            val oldFile = java.io.File(oldPath)
+                            val parent = oldFile.parentFile
+                            val newFile = if (parent != null) java.io.File(parent, newFileName) else null
+                            if (newFile != null) {
+                                MediaScannerConnection.scanFile(
+                                    context,
+                                    arrayOf(oldFile.absolutePath, newFile.absolutePath),
+                                    null
+                                ) { _, _ -> }
+                            }
+                        }
+                        coroutineScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                            Toast.makeText(context, "이름이 변경되었습니다.", Toast.LENGTH_SHORT).show()
+                            refreshTrigger++
+                        }
+                    } else {
+                        coroutineScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                            Toast.makeText(context, "이름 변경에 실패했습니다.", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } catch (securityException: SecurityException) {
+                    coroutineScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                        val recoverableSecurityException = securityException as? android.app.RecoverableSecurityException
+                        if (recoverableSecurityException != null) {
+                            pendingAction = { renameFile(video, newName); Unit }
+                            val intentSender = recoverableSecurityException.getUserAction().getActionIntent().getIntentSender()
+                            val intentSenderRequest = IntentSenderRequest.Builder(intentSender).build()
+                            writePermissionLauncher.launch(intentSenderRequest)
+                        } else {
+                            Toast.makeText(context, "권한이 없습니다: ${securityException.localizedMessage}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } catch (e: Exception) {
+                    coroutineScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                        Toast.makeText(context, "오류가 발생했습니다: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            try {
+                val pendingIntent = android.provider.MediaStore.createWriteRequest(context.contentResolver, listOf(video.uri))
+                pendingAction = action
+                val intentSenderRequest = IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                writePermissionLauncher.launch(intentSenderRequest)
+            } catch (e: Exception) {
+                action()
+            }
+        } else {
+            action()
+        }
+    }
+
+    fun deleteFile(video: LocalVideoItem) {
+        val action: () -> Unit = {
+            coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val rowsDeleted = context.contentResolver.delete(video.uri, null, null)
+                    if (rowsDeleted > 0) {
+                        video.path?.let {
+                            MediaScannerConnection.scanFile(context, arrayOf(it), null) { _, _ -> }
+                        }
+                        coroutineScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                            Toast.makeText(context, "파일이 삭제되었습니다.", Toast.LENGTH_SHORT).show()
+                            refreshTrigger++
+                        }
+                    } else {
+                        coroutineScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                            Toast.makeText(context, "파일 삭제에 실패했습니다.", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } catch (securityException: SecurityException) {
+                    coroutineScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                        val recoverableSecurityException = securityException as? android.app.RecoverableSecurityException
+                        if (recoverableSecurityException != null) {
+                            pendingAction = { deleteFile(video); Unit }
+                            val intentSender = recoverableSecurityException.getUserAction().getActionIntent().getIntentSender()
+                            val intentSenderRequest = IntentSenderRequest.Builder(intentSender).build()
+                            writePermissionLauncher.launch(intentSenderRequest)
+                        } else {
+                            Toast.makeText(context, "권한이 없습니다: ${securityException.localizedMessage}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } catch (e: Exception) {
+                    coroutineScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                        Toast.makeText(context, "오류가 발생했습니다: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            try {
+                val pendingIntent = android.provider.MediaStore.createDeleteRequest(context.contentResolver, listOf(video.uri))
+                pendingAction = {
+                    video.path?.let {
+                        MediaScannerConnection.scanFile(context, arrayOf(it), null) { _, _ -> }
+                    }
+                    Toast.makeText(context, "파일이 삭제되었습니다.", Toast.LENGTH_SHORT).show()
+                    refreshTrigger++
+                }
+                val intentSenderRequest = IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                writePermissionLauncher.launch(intentSenderRequest)
+            } catch (e: Exception) {
+                action()
+            }
+        } else {
+            action()
+        }
+    }
+
+    if (showActionDialog && selectedVideoForAction != null) {
+        AlertDialog(
+            onDismissRequest = { showActionDialog = false },
+            title = { Text("파일 작업") },
+            text = { Text("선택한 파일: ${selectedVideoForAction?.title}") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showActionDialog = false
+                    showRenameDialog = true
+                }) {
+                    Text("이름 변경")
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        showActionDialog = false
+                        showDeleteDialog = true
+                    }) {
+                        Text("삭제", color = MaterialTheme.colorScheme.error)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    TextButton(onClick = { showActionDialog = false }) {
+                        Text("취소")
+                    }
+                }
+            }
+        )
+    }
+
+    if (showRenameDialog && selectedVideoForAction != null) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text("파일 이름 변경") },
+            text = {
+                Column {
+                    Text("새 이름을 입력하세요:")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = renameInputText,
+                        onValueChange = { renameInputText = it },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (renameInputText.isNotBlank()) {
+                        renameFile(selectedVideoForAction!!, renameInputText.trim())
+                        showRenameDialog = false
+                    } else {
+                        Toast.makeText(context, "이름을 입력해야 합니다.", Toast.LENGTH_SHORT).show()
+                    }
+                }) {
+                    Text("변경")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameDialog = false }) {
+                    Text("취소")
+                }
+            }
+        )
+    }
+
+    if (showDeleteDialog && selectedVideoForAction != null) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text("파일 삭제") },
+            text = { Text("정말로 이 파일을 삭제하시겠습니까?\n${selectedVideoForAction?.title}\n이 작업은 되돌릴 수 없습니다.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteFile(selectedVideoForAction!!)
+                    showDeleteDialog = false
+                }) {
+                    Text("삭제", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteDialog = false }) {
+                    Text("취소")
+                }
+            }
+        )
     }
 }
 
