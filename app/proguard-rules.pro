@@ -19,3 +19,10 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Media3 (ExoPlayer) Dynamic Factory & Extension keep rules
+-keep class androidx.media3.exoplayer.hls.** { *; }
+-keep class androidx.media3.exoplayer.dash.** { *; }
+-keep class androidx.media3.exoplayer.rtsp.** { *; }
+-keep class androidx.media3.exoplayer.source.ProgressiveMediaSource$Factory { *; }
+-keep class androidx.media3.exoplayer.source.DefaultMediaSourceFactory { *; }
