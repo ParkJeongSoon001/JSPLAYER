@@ -3801,18 +3801,36 @@ fun VideoPlayerScreen(
 
     // --- 자막 오프셋 적용 (모든 포맷 지원: SRT/ASS/VTT, 원본 기준 오프셋 계산) ---
     LaunchedEffect(subtitleOffsetMs) {
-        if (originalSubtitleUrl == null) return@LaunchedEffect
+        val targetSubUrl = originalSubtitleUrl ?: finalSubtitleUrl
+        if (targetSubUrl == null) return@LaunchedEffect
         // VLC 모드에서는 VlcSubtitleOverlay에서 실시간 오프셋 처리하므로 ExoPlayer 자막 재로드 불필요
         if (useVlcFallback) return@LaunchedEffect
         
         // Debounce: 빠르게 연속 클릭 시 마지막 값만 적용 (200ms 대기)
         kotlinx.coroutines.delay(200L)
         
-        val sourceUrl = originalSubtitleUrl!!  // ★ 항상 원본 기준
-        val subtitlePath = sourceUrl.removePrefix("file://")
-        val subtitleFile = java.io.File(subtitlePath)
+        var sourceUrl = targetSubUrl
+        var subtitlePath = sourceUrl.removePrefix("file://")
+        var subtitleFile = java.io.File(subtitlePath)
+        
+        // 원본 자막 파일이 로컬에 없거나 네트워크 URL인 경우 다운로드/캐시 시도
         if (!subtitleFile.exists()) {
-            android.util.Log.e("VideoPlayerScreen", "원본 자막 파일 없음: $subtitlePath")
+            android.util.Log.d("VideoPlayerScreen", "원본 자막 파일이 로컬에 없음, 다운로드/캐시 시도: $sourceUrl")
+            val (downloadedUrl, downloadedExt) = downloadAndProcessSubtitle(
+                context, sourceUrl, ftpEncoding = ftpEncoding, httpHeaders = httpHeaders, providedExtension = finalSubtitleExt
+            )
+            if (downloadedUrl != null) {
+                sourceUrl = downloadedUrl
+                subtitlePath = sourceUrl.removePrefix("file://")
+                subtitleFile = java.io.File(subtitlePath)
+                if (downloadedExt != null) {
+                    finalSubtitleExt = downloadedExt
+                }
+            }
+        }
+        
+        if (!subtitleFile.exists()) {
+            android.util.Log.e("VideoPlayerScreen", "자막 파일 존재 안함, 오프셋 적용 불가: $subtitlePath")
             return@LaunchedEffect
         }
         
@@ -3834,7 +3852,16 @@ fun VideoPlayerScreen(
                 }
                 
                 val targetExt = if (ext in listOf("ass", "ssa")) "ass" else if (ext == "vtt") "vtt" else "srt"
-                val offsetFile = java.io.File(context.cacheDir, "cached_sub_offset.$targetExt")
+                
+                // 이전 임시 자막 오프셋 캐시 파일 청소
+                context.cacheDir.listFiles()?.forEach { file ->
+                    if (file.name.startsWith("cached_sub_offset_")) {
+                        try { file.delete() } catch (_: Exception) {}
+                    }
+                }
+                
+                val timestamp = System.currentTimeMillis()
+                val offsetFile = java.io.File(context.cacheDir, "cached_sub_offset_${timestamp}.$targetExt")
                 offsetFile.writeText(adjustedText, kotlin.text.Charsets.UTF_8)
                 
                 val currentPos = exoPlayer.currentPosition
@@ -3852,7 +3879,7 @@ fun VideoPlayerScreen(
                     .setLanguage("ko")
                     .setSelectionFlags(androidx.media3.common.C.SELECTION_FLAG_DEFAULT or androidx.media3.common.C.SELECTION_FLAG_FORCED)
                     .setRoleFlags(androidx.media3.common.C.ROLE_FLAG_SUBTITLE)
-                    .setId("jsplayer_external_sub")
+                    .setId("jsplayer_external_sub_${timestamp}")
                     .build()
                 
                 val currentMediaItem = exoPlayer.currentMediaItem ?: return@withContext
@@ -3861,7 +3888,7 @@ fun VideoPlayerScreen(
                     .build()
                 
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    exoPlayer.setMediaItem(newMediaItem)
+                    exoPlayer.setMediaItem(newMediaItem, false)
                     exoPlayer.prepare()
                     exoPlayer.seekTo(currentPos)
                     exoPlayer.playWhenReady = wasPlaying
@@ -6448,7 +6475,7 @@ fun formatSrtTime(ms: Long): String {
  */
 fun adjustSrtTimestamps(srtText: String, offsetMs: Long): String {
     if (offsetMs == 0L) return srtText
-    val timePattern = Regex("(\\d{2}):(\\d{2}):(\\d{2}),(\\d{3})")
+    val timePattern = Regex("(\\d{1,2}):(\\d{2}):(\\d{2})[,\\.](\\d{3})")
     return timePattern.replace(srtText) { match ->
         val h = match.groupValues[1].toLong()
         val m = match.groupValues[2].toLong()
@@ -6461,7 +6488,7 @@ fun adjustSrtTimestamps(srtText: String, offsetMs: Long): String {
 
 fun adjustAssTimestamps(assText: String, offsetMs: Long): String {
     if (offsetMs == 0L) return assText
-    val timePattern = Regex("(\\d):(\\d{2}):(\\d{2})\\.(\\d{2})")
+    val timePattern = Regex("(\\d{1,2}):(\\d{2}):(\\d{2})[\\.,](\\d{2})")
     return timePattern.replace(assText) { match ->
         val h = match.groupValues[1].toLong()
         val m = match.groupValues[2].toLong()
@@ -6482,7 +6509,7 @@ fun formatAssTime(ms: Long): String {
 
 fun adjustVttTimestamps(vttText: String, offsetMs: Long): String {
     if (offsetMs == 0L) return vttText
-    val timePattern = Regex("(?:(\\d{2}):)?(\\d{2}):(\\d{2})\\.(\\d{3})")
+    val timePattern = Regex("(?:(\\d{1,2}):)?(\\d{2}):(\\d{2})[\\.,](\\d{3})")
     return timePattern.replace(vttText) { match ->
         val hStr = match.groupValues[1]
         val h = if (hStr.isNotEmpty()) hStr.toLong() else 0L

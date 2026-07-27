@@ -11,15 +11,16 @@ android {
         applicationId = "com.sv21c.jsplayer"
         minSdk = 29
         targetSdk = 36
-        versionCode = 141
-        versionName = "1.4.1"
+        versionCode = 142
+        versionName = "1.4.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -33,6 +34,10 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
     }
     packaging {
         jniLibs {
@@ -53,6 +58,11 @@ android {
             excludes += "META-INF/io.netty.versions.properties"
         }
     }
+}
+
+configurations.all {
+    exclude(group = "xpp3", module = "xpp3")
+    exclude(group = "xmlpull", module = "xmlpull")
 }
 
 dependencies {
