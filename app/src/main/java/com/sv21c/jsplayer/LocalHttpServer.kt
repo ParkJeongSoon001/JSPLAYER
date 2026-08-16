@@ -46,7 +46,8 @@ class LocalHttpServer(
         val size: Long = -1L,
         val inputStreamProvider: () -> InputStream?,
         val rangeStreamProvider: ((start: Long, end: Long) -> InputStream?)? = null,
-        val originalUrl: String = ""
+        val originalUrl: String = "",
+        var subtitleHttpUrl: String? = null
     )
 
     override fun start() {
@@ -423,28 +424,69 @@ class LocalHttpServer(
     }
 
     /**
-     * 자막 파일을 HTTP URL로 등록
+     * 자막 파일을 HTTP URL로 등록 (스마트 TV 호환을 위한 SMI → SRT 자동 변환 및 UTF-8 인코딩 처리)
      */
     fun registerSubtitleFile(subtitlePath: String): String {
-        val file = File(subtitlePath.removePrefix("file://"))
+        val rawPath = subtitlePath.removePrefix("file://")
+        val cleanPath = try { android.net.Uri.decode(rawPath) } catch (_: Exception) { rawPath }
+        var file = File(cleanPath)
         if (!file.exists()) {
-            Log.e(TAG, "자막 파일이 존재하지 않음: $subtitlePath")
+            file = File(rawPath)
+        }
+        if (!file.exists()) {
+            Log.e(TAG, "자막 파일이 존재하지 않음: $subtitlePath (decoded: $cleanPath)")
             return ""
         }
 
-        val token = "sub_${System.currentTimeMillis()}_${file.name.hashCode().toUInt()}"
-        val mimeType = guessSubtitleMimeType(file.name)
+        var targetFile = file
+        var mimeType = "application/x-subrip"
+
+        try {
+            val bytes = file.readBytes()
+            var text = ""
+            if (bytes.size >= 2 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xFE.toByte()) {
+                text = String(bytes, 2, bytes.size - 2, kotlin.text.Charsets.UTF_16LE)
+            } else if (bytes.size >= 2 && bytes[0] == 0xFE.toByte() && bytes[1] == 0xFF.toByte()) {
+                text = String(bytes, 2, bytes.size - 2, kotlin.text.Charsets.UTF_16BE)
+            } else {
+                text = String(bytes, kotlin.text.Charsets.UTF_8)
+                if (text.contains("\uFFFD") || (!text.contains("<sami", true) && file.extension.lowercase() == "smi")) {
+                    text = String(bytes, java.nio.charset.Charset.forName("EUC-KR"))
+                }
+            }
+
+            val lowerText = text.lowercase()
+            val isSmi = lowerText.contains("<sami") || file.extension.lowercase() == "smi"
+
+            if (isSmi) {
+                val srtText = convertSmiToSrt(text)
+                val cacheFile = File(context.cacheDir, "cast_converted_${System.currentTimeMillis()}.srt")
+                cacheFile.writeText(srtText, kotlin.text.Charsets.UTF_8)
+                targetFile = cacheFile
+                Log.d(TAG, "✅ [캐스팅 자막 변환] SMI → SRT 변환 완료: ${cacheFile.absolutePath}")
+            } else {
+                val cacheFile = File(context.cacheDir, "cast_utf8_${System.currentTimeMillis()}.srt")
+                cacheFile.writeText(text, kotlin.text.Charsets.UTF_8)
+                targetFile = cacheFile
+                Log.d(TAG, "✅ [캐스팅 자막 준비] UTF-8 SRT 저장 완료: ${cacheFile.absolutePath}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "자막 파일 변환 중 오류 발생, 원본 파일 사용", e)
+        }
+
+        val token = "sub_${System.currentTimeMillis()}_${targetFile.name.hashCode().toUInt()}"
 
         streamSources[token] = StreamSource(
             token = token,
             mimeType = mimeType,
-            size = file.length(),
-            inputStreamProvider = { FileInputStream(file) },
+            size = targetFile.length(),
+            inputStreamProvider = { FileInputStream(targetFile) },
             originalUrl = subtitlePath
         )
 
-        val url = "${getServerUrl()}/stream/$token/${encodeFileName(file.name)}"
-        Log.d(TAG, "자막 파일 등록됨: $subtitlePath → $url")
+        val srtFileName = if (targetFile.name.endsWith(".srt", ignoreCase = true)) targetFile.name else "${targetFile.nameWithoutExtension}.srt"
+        val url = "${getServerUrl()}/stream/$token/${encodeFileName(srtFileName)}"
+        Log.d(TAG, "📺 캐스팅용 최종 자막 URL 등록 완료: $subtitlePath → $url (MIME: $mimeType, 크기: ${targetFile.length()} bytes)")
         return url
     }
 
@@ -461,6 +503,7 @@ class LocalHttpServer(
 
         Log.d(TAG, "━━━ getStreamableUrl ━━━")
         Log.d(TAG, "videoUrl: $safeVideoUrl")
+        Log.d(TAG, "subtitleUrl: $safeSubtitleUrl")
         Log.d(TAG, "scheme: $scheme, credentials: ${if (credentials != null) "있음(user=${credentials.username})" else "없음"}")
 
         val streamVideoUrl = when {
@@ -539,6 +582,13 @@ class LocalHttpServer(
             }
         } else null
 
+        // 비디오 소스에 자막 HTTP URL 바인딩 (삼성/LG TV 자동 자막 인식용)
+        if (streamSubtitleUrl != null && streamVideoUrl.startsWith(getServerUrl())) {
+            val videoToken = streamVideoUrl.removePrefix("${getServerUrl()}/stream/").substringBefore("/")
+            streamSources[videoToken]?.subtitleHttpUrl = streamSubtitleUrl
+            Log.d(TAG, "🔗 비디오 소스($videoToken)에 자막 URL 바인딩: $streamSubtitleUrl")
+        }
+
         return Pair(streamVideoUrl, streamSubtitleUrl)
     }
 
@@ -571,6 +621,24 @@ class LocalHttpServer(
             // 자막 파일 요청인지 확인
             if (token.startsWith("sub_")) {
                 Log.d(TAG, "🎯 자막 파일 요청 수신! token=$token, mime=${source.mimeType}, size=${source.size}")
+                // 자막 전용 응답: Content-Type 강제 + CORS + 벤더 호환 헤더
+                val subInputStream = source.inputStreamProvider() ?: return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Stream error")
+                val subBytes = subInputStream.readBytes()
+                subInputStream.close()
+                val response = newFixedLengthResponse(Response.Status.OK, "application/x-subrip; charset=utf-8", String(subBytes, kotlin.text.Charsets.UTF_8))
+                response.addHeader("Content-Length", subBytes.size.toString())
+                response.addHeader("Content-Disposition", "inline; filename=\"subtitle.srt\"")
+                response.addHeader("Access-Control-Allow-Origin", "*")
+                response.addHeader("Access-Control-Allow-Headers", "*")
+                response.addHeader("Accept-Ranges", "bytes")
+                // Samsung TV 자막 인식 헤더
+                response.addHeader("CaptionInfo.sec", source.originalUrl)
+                response.addHeader("sec:CaptionInfoEx", source.originalUrl)
+                // DLNA 호환 헤더
+                response.addHeader("transferMode.dlna.org", "Interactive")
+                response.addHeader("contentFeatures.dlna.org", "DLNA.ORG_OP=01;DLNA.ORG_CI=0")
+                Log.d(TAG, "📺 자막 응답 전송: ${subBytes.size} bytes, Content-Type=application/x-subrip; charset=utf-8")
+                return response
             }
 
             // HEAD 요청 처리 (TV가 파일 정보를 먼저 확인)
@@ -583,6 +651,10 @@ class LocalHttpServer(
                 response.addHeader("Accept-Ranges", "bytes")
                 response.addHeader("transferMode.dlna.org", "Streaming")
                 response.addHeader("contentFeatures.dlna.org", "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000")
+                source.subtitleHttpUrl?.let { subUrl ->
+                    response.addHeader("CaptionInfo.sec", subUrl)
+                    response.addHeader("sec:CaptionInfoEx", subUrl)
+                }
                 return response
             }
 
@@ -599,7 +671,12 @@ class LocalHttpServer(
             // Range 요청이고 rangeStreamProvider가 있으면 직접 Range 스트림 사용 (WebDAV 최적화)
             if (rangeHeader != null && source.size > 0 && source.rangeStreamProvider != null) {
                 Log.d(TAG, "🎬 Range 스트림 (upstream 직접 전달): $rangeHeader")
-                return serveRangeWithProvider(source, rangeHeader)
+                val response = serveRangeWithProvider(source, rangeHeader)
+                source.subtitleHttpUrl?.let { subUrl ->
+                    response.addHeader("CaptionInfo.sec", subUrl)
+                    response.addHeader("sec:CaptionInfoEx", subUrl)
+                }
+                return response
             }
 
             Log.d(TAG, "🎬 스트림 시작: mime=${source.mimeType}, size=${source.size}")
@@ -611,7 +688,12 @@ class LocalHttpServer(
 
             if (rangeHeader != null && source.size > 0) {
                 Log.d(TAG, "📐 Range 요청 처리 (skip 방식): $rangeHeader")
-                return serveRangeRequest(inputStream, source, rangeHeader)
+                val response = serveRangeRequest(inputStream, source, rangeHeader)
+                source.subtitleHttpUrl?.let { subUrl ->
+                    response.addHeader("CaptionInfo.sec", subUrl)
+                    response.addHeader("sec:CaptionInfoEx", subUrl)
+                }
+                return response
             }
 
             // 전체 파일 전송
@@ -626,6 +708,10 @@ class LocalHttpServer(
             response.addHeader("Accept-Ranges", "bytes")
             response.addHeader("transferMode.dlna.org", "Streaming")
             response.addHeader("contentFeatures.dlna.org", "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000")
+            source.subtitleHttpUrl?.let { subUrl ->
+                response.addHeader("CaptionInfo.sec", subUrl)
+                response.addHeader("sec:CaptionInfoEx", subUrl)
+            }
             return response
         } catch (e: Exception) {
             Log.e(TAG, "❌ 스트리밍 오류: ${e.message}", e)
@@ -811,6 +897,71 @@ class LocalHttpServer(
         } catch (e: Exception) {
             name
         }
+    }
+
+    private fun convertSmiToSrt(smiText: String): String {
+        val srt = StringBuilder()
+        var counter = 1
+
+        val hasKrcc = smiText.contains(Regex("(?i)<P[^>]*Class\\s*=\\s*[\"']?KRCC[\"']?[^>]*>"))
+        val parts = smiText.split(Regex("(?i)<SYNC"))
+
+        var currentStart = -1L
+        var currentText = ""
+
+        for (i in 1 until parts.size) {
+            val part = parts[i]
+            val startMatch = Regex("(?i)\\s*Start\\s*=\\s*[\"']?([0-9]+)[\"']?").find(part)
+
+            if (startMatch != null) {
+                val timeMs = startMatch.groupValues[1].toLong()
+                val textStart = part.indexOf('>')
+                var rawText = if (textStart != -1) part.substring(textStart + 1) else ""
+
+                if (hasKrcc) {
+                    val pParts = rawText.split(Regex("(?i)<P\\b"))
+                    var krccText = ""
+                    for (pPart in pParts) {
+                        val match = Regex("(?i)^[^>]*Class\\s*=\\s*[\"']?KRCC[\"']?[^>]*>(.*)", RegexOption.DOT_MATCHES_ALL).find(pPart)
+                        if (match != null) {
+                            krccText += (if (krccText.isEmpty()) "" else "\n") + match.groupValues[1]
+                        }
+                    }
+                    rawText = if (krccText.isNotEmpty()) krccText else if (rawText.contains("Class=", ignoreCase = true)) "" else rawText
+                }
+
+                var cleanText = rawText.replace(Regex("(?i)<br[^>]*>"), "\n")
+                cleanText = cleanText.replace(Regex("<[^>]+>"), "")
+                cleanText = cleanText.replace("&nbsp;", " ").replace("&#160;", " ").replace("\u00A0", " ").replace("&amp;", "&")
+                cleanText = cleanText.lines().joinToString("\n") { it.trim() }.trim()
+
+                if (currentStart >= 0L && currentText.isNotEmpty()) {
+                    val endMs = if (timeMs > currentStart) timeMs else currentStart + 2000L
+                    srt.append(counter++).append("\n")
+                    srt.append(formatMsToSrtTime(currentStart)).append(" --> ").append(formatMsToSrtTime(endMs)).append("\n")
+                    srt.append(currentText).append("\n\n")
+                }
+
+                currentStart = timeMs
+                currentText = cleanText
+            }
+        }
+
+        if (currentStart >= 0L && currentText.isNotEmpty()) {
+            srt.append(counter++).append("\n")
+            srt.append(formatMsToSrtTime(currentStart)).append(" --> ").append(formatMsToSrtTime(currentStart + 3000L)).append("\n")
+            srt.append(currentText).append("\n\n")
+        }
+
+        return srt.toString()
+    }
+
+    private fun formatMsToSrtTime(ms: Long): String {
+        val seconds = (ms / 1000) % 60
+        val minutes = (ms / (1000 * 60)) % 60
+        val hours = ms / (1000 * 60 * 60)
+        val millis = ms % 1000
+        return String.format(java.util.Locale.US, "%02d:%02d:%02d,%03d", hours, minutes, seconds, millis)
     }
 
     private fun getSafeEncodedUrl(url: String): String {

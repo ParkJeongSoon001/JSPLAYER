@@ -501,81 +501,18 @@ class MainActivity : ComponentActivity() {
                                     if (parent != null && parent.exists() && parent.isDirectory) {
                                         val subs = parent.listFiles { _, name ->
                                             val lower = name.lowercase()
-                                            val isSubExt = lower.endsWith(".smi") || lower.endsWith(".srt") || lower.endsWith(".vtt") || lower.endsWith(".ass")
+                                            val isSubExt = lower.endsWith(".smi") || lower.endsWith(".srt") || lower.endsWith(".vtt") || lower.endsWith(".ass") || lower.endsWith(".ssa") || lower.endsWith(".sub")
                                             val itBase = name.substringBeforeLast(".")
-                                            isSubExt && (itBase == baseName || (itBase.startsWith(baseName) && itBase.getOrNull(baseName.length) == '.'))
+                                            isSubExt && (itBase.equals(baseName, ignoreCase = true) || itBase.startsWith(baseName, ignoreCase = true) || baseName.startsWith(itBase, ignoreCase = true))
                                         }
                                         if (subs != null && subs.isNotEmpty()) {
-                                            val subFile = subs.find { it.extension.equals("ass", true) }
+                                            val subFile = subs.find { it.extension.equals("ass", true) || it.extension.equals("ssa", true) }
                                                 ?: subs.find { it.extension.equals("srt", true) }
                                                 ?: subs.find { it.extension.equals("smi", true) }
                                                 ?: subs[0]
                                             localSubUrl = "file://" + subFile.absolutePath
                                             localSubExt = subFile.extension.lowercase()
                                             android.util.Log.d("SubtitleSearch", "[EXTERNAL] Found subtitle: $localSubUrl (Ext: $localSubExt)")
-
-                                            // 인코딩 감지 & SMI→SRT 변환
-                                            try {
-                                                if (subFile.length() > 10 * 1024 * 1024) throw Exception("Subtitle too large")
-                                                val bytes = subFile.readBytes()
-                                                if (bytes.isNotEmpty()) {
-                                                    val sniffEnd = Math.min(bytes.size, 4096)
-                                                    val sniffText = String(bytes.copyOfRange(0, sniffEnd), kotlin.text.Charsets.UTF_8).lowercase()
-                                                    val isLikelySubtitle = sniffText.contains("<sami") || sniffText.contains("-->") || sniffText.contains("[script info]") || sniffText.contains("dialogue:") || sniffText.contains("webvtt")
-                                                    if (!isLikelySubtitle && bytes.size > 1024 * 1024) throw Exception("Doesn't look like a subtitle")
-                                                    
-                                                    var text = ""
-                                                    val b0 = bytes[0].toInt() and 0xFF
-                                                    val b1 = if (bytes.size > 1) bytes[1].toInt() and 0xFF else 0
-
-                                                    if (b0 == 0xFF && b1 == 0xFE) {
-                                                        text = String(bytes, kotlin.text.Charsets.UTF_16LE)
-                                                    } else if (b0 == 0xFE && b1 == 0xFF) {
-                                                        text = String(bytes, kotlin.text.Charsets.UTF_16BE)
-                                                    } else if (b0 == 0x3C && b1 == 0x00) {
-                                                        text = String(bytes, kotlin.text.Charsets.UTF_16LE)
-                                                    } else if (b0 == 0x00 && b1 == 0x3C) {
-                                                        text = String(bytes, kotlin.text.Charsets.UTF_16BE)
-                                                    } else {
-                                                        text = String(bytes, kotlin.text.Charsets.UTF_8)
-                                                        if (text.contains("\uFFFD") || (!text.contains("<sami", true) && localSubExt == "smi")) {
-                                                            text = String(bytes, java.nio.charset.Charset.forName("EUC-KR"))
-                                                        }
-                                                    }
-
-                                                    text = text.replace(Regex("charset=euc-kr", RegexOption.IGNORE_CASE), "charset=utf-8")
-                                                    text = text.replace(Regex("charset=\"euc-kr\"", RegexOption.IGNORE_CASE), "charset=\"utf-8\"")
-                                                    text = text.replace(Regex("charset=cp949", RegexOption.IGNORE_CASE), "charset=utf-8")
-
-                                                    val lowerText = text.lowercase()
-                                                    val isSmi = lowerText.contains("<sami")
-                                                    val isSrt = lowerText.contains("-->")
-                                                    val isAss = lowerText.contains("[script info]") || lowerText.contains("dialogue:") || localSubExt == "ass"
-
-                                                    if ((localSubExt == "smi" && isSmi) || isSmi) {
-                                                        val srtText = convertSmiToSrt(text)
-                                                        val cacheFile = java.io.File(this@MainActivity.cacheDir, "cached_ext_sub.srt")
-                                                        cacheFile.writeText(srtText, kotlin.text.Charsets.UTF_8)
-                                                        localSubUrl = "file://" + cacheFile.absolutePath
-                                                        localSubExt = "srt"
-                                                        android.util.Log.d("SubtitleSearch", "[EXTERNAL] Converted SMI to SRT: $localSubUrl")
-                                                    } else if ((localSubExt == "srt" && isSrt) || isSrt) {
-                                                        val cacheFile = java.io.File(this@MainActivity.cacheDir, "cached_ext_sub.srt")
-                                                        cacheFile.writeText(text, kotlin.text.Charsets.UTF_8)
-                                                        localSubUrl = "file://" + cacheFile.absolutePath
-                                                        localSubExt = "srt"
-                                                        android.util.Log.d("SubtitleSearch", "[EXTERNAL] Saved SRT: $localSubUrl")
-                                                    } else if (isAss) {
-                                                        val cacheFile = java.io.File(this@MainActivity.cacheDir, "cached_ext_sub.ass")
-                                                        cacheFile.writeText(text, kotlin.text.Charsets.UTF_8)
-                                                        localSubUrl = "file://" + cacheFile.absolutePath
-                                                        localSubExt = "ass"
-                                                        android.util.Log.d("SubtitleSearch", "[EXTERNAL] Saved ASS: $localSubUrl")
-                                                    }
-                                                }
-                                            } catch (e: Exception) {
-                                                android.util.Log.d("SubtitleSearch", "[EXTERNAL] Error parsing subtitle: ${e.message}")
-                                            }
                                         } else {
                                             android.util.Log.d("SubtitleSearch", "[EXTERNAL] No matching subtitle found")
                                         }
@@ -1592,81 +1529,18 @@ class MainActivity : ComponentActivity() {
                                                 if (parent != null && parent.exists() && parent.isDirectory) {
                                                     val subs = parent.listFiles { _, name -> 
                                                         val lower = name.lowercase()
-                                                        val isSubExt = lower.endsWith(".smi") || lower.endsWith(".srt") || lower.endsWith(".vtt") || lower.endsWith(".ass")
+                                                        val isSubExt = lower.endsWith(".smi") || lower.endsWith(".srt") || lower.endsWith(".vtt") || lower.endsWith(".ass") || lower.endsWith(".ssa") || lower.endsWith(".sub")
                                                         val itBase = name.substringBeforeLast(".")
-                                                        isSubExt && (itBase == baseName || (itBase.startsWith(baseName) && itBase.getOrNull(baseName.length) == '.'))
+                                                        isSubExt && (itBase.equals(baseName, ignoreCase = true) || itBase.startsWith(baseName, ignoreCase = true) || baseName.startsWith(itBase, ignoreCase = true))
                                                     }
                                                     if (subs != null && subs.isNotEmpty()) {
-                                                        val subFile = subs.find { it.extension.equals("ass", true) }
+                                                        val subFile = subs.find { it.extension.equals("ass", true) || it.extension.equals("ssa", true) }
                                                             ?: subs.find { it.extension.equals("srt", true) }
                                                             ?: subs.find { it.extension.equals("smi", true) }
                                                             ?: subs[0]
                                                         localSubUrl = "file://" + subFile.absolutePath
                                                         localSubExt = subFile.extension.lowercase()
                                                         android.util.Log.d("SubtitleSearch", "Found local subtitle: $localSubUrl (Ext: $localSubExt)")
-                                                        
-                                                        // Convert SMI/Parse encoding
-                                                        try {
-                                                            if (subFile.length() > 10 * 1024 * 1024) throw Exception("Subtitle too large")
-                                                            val bytes = subFile.readBytes()
-                                                            if (bytes.isNotEmpty()) {
-                                                                val sniffEnd = Math.min(bytes.size, 4096)
-                                                                val sniffText = String(bytes.copyOfRange(0, sniffEnd), kotlin.text.Charsets.UTF_8).lowercase()
-                                                                val isLikelySubtitle = sniffText.contains("<sami") || sniffText.contains("-->") || sniffText.contains("[script info]") || sniffText.contains("dialogue:") || sniffText.contains("webvtt")
-                                                                if (!isLikelySubtitle && bytes.size.compareTo(1024 * 1024) > 0) throw Exception("Doesn't look like a subtitle")
-                                                                
-                                                                var text = ""
-                                                                val b0 = bytes[0].toInt() and 0xFF
-                                                                val b1 = if (bytes.size.compareTo(1) > 0) bytes[1].toInt() and 0xFF else 0
-                                                                
-                                                                if (b0 == 0xFF && b1 == 0xFE) {
-                                                                    text = String(bytes, kotlin.text.Charsets.UTF_16LE)
-                                                                } else if (b0 == 0xFE && b1 == 0xFF) {
-                                                                    text = String(bytes, kotlin.text.Charsets.UTF_16BE)
-                                                                } else if (b0 == 0x3C && b1 == 0x00) {
-                                                                    text = String(bytes, kotlin.text.Charsets.UTF_16LE)
-                                                                } else if (b0 == 0x00 && b1 == 0x3C) {
-                                                                    text = String(bytes, kotlin.text.Charsets.UTF_16BE)
-                                                                } else {
-                                                                    text = String(bytes, kotlin.text.Charsets.UTF_8)
-                                                                    if (text.contains("\uFFFD") || (!text.contains("<sami", true) && localSubExt == "smi")) {
-                                                                        text = String(bytes, java.nio.charset.Charset.forName("EUC-KR"))
-                                                                    }
-                                                                }
-                                                                
-                                                                text = text.replace(Regex("charset=euc-kr", RegexOption.IGNORE_CASE), "charset=utf-8")
-                                                                text = text.replace(Regex("charset=\"euc-kr\"", RegexOption.IGNORE_CASE), "charset=\"utf-8\"")
-                                                                text = text.replace(Regex("charset=cp949", RegexOption.IGNORE_CASE), "charset=utf-8")
-                                                                
-                                                                val lowerText = text.lowercase()
-                                                                val isSmi = lowerText.contains("<sami")
-                                                                val isSrt = lowerText.contains("-->")
-                                                                val isAss = lowerText.contains("[script info]") || lowerText.contains("dialogue:") || localSubExt == "ass"
-                                                                
-                                                                if ((localSubExt == "smi" && isSmi) || isSmi) {
-                                                                    val srtText = convertSmiToSrt(text)
-                                                                    val cacheFile = java.io.File(this@MainActivity.cacheDir, "cached_local_sub.srt")
-                                                                    cacheFile.writeText(srtText, kotlin.text.Charsets.UTF_8)
-                                                                    localSubUrl = "file://" + cacheFile.absolutePath
-                                                                    localSubExt = "srt"
-                                                                    android.util.Log.d("SubtitleSearch", "Successfully converted Local SMI to SRT at $localSubUrl")
-                                                                } else if ((localSubExt == "srt" && isSrt) || isSrt) {
-                                                                    val cacheFile = java.io.File(this@MainActivity.cacheDir, "cached_local_sub.srt")
-                                                                    cacheFile.writeText(text, kotlin.text.Charsets.UTF_8)
-                                                                    localSubUrl = "file://" + cacheFile.absolutePath
-                                                                    localSubExt = "srt"
-                                                                    android.util.Log.d("SubtitleSearch", "Successfully saved Local SRT to cache $localSubUrl")
-                                                                } else if (isAss) {
-                                                                    val cacheFile = java.io.File(this@MainActivity.cacheDir, "cached_local_sub.ass")
-                                                                    cacheFile.writeText(text, kotlin.text.Charsets.UTF_8)
-                                                                    localSubUrl = "file://" + cacheFile.absolutePath
-                                                                    localSubExt = "ass"
-                                                                    android.util.Log.d("SubtitleSearch", "Successfully saved Local ASS to cache $localSubUrl")
-                                                                }
-                                                            }
-                                                        } catch (e: Throwable) {
-                                                            android.util.Log.d("SubtitleSearch", "Error parsing local subtitle: ${e.message}")
-                                                        }
                                                     } else {
                                                         android.util.Log.d("SubtitleSearch", "No matching subtitle found in directory.")
                                                     }
@@ -1869,12 +1743,45 @@ class MainActivity : ComponentActivity() {
                                         Thread {
                                             android.util.Log.d("Casting", "━━━ 캐스팅 시작 (백그라운드) ━━━")
                                             android.util.Log.d("Casting", "videoUrl: $videoUrl")
-                                            android.util.Log.d("Casting", "effectiveSubUrl: $effectiveSubUrl")
-                                            android.util.Log.d("Casting", "credentials: ${if (credentials != null) "있음(user=${credentials.username})" else "없음"}")
+                                            android.util.Log.d("Casting", "actualSubtitleUrl(VideoPlayerScreen 전달): $actualSubtitleUrl")
+                                            android.util.Log.d("Casting", "state.subtitleUrl(Playing 상태): ${state.subtitleUrl}")
+                                            android.util.Log.d("Casting", "effectiveSubUrl(최종 외부자막): $effectiveSubUrl")
+
+                                            // 자막이 있는 경우, 모든 소스(SMB, WebDAV, 로컬 등)를 로컬 UTF-8 SRT로 안전하게 사전 준비
+                                            var readySubUrl: String? = null
+                                            if (effectiveSubUrl != null) {
+                                                try {
+                                                    val subLocalFile = if (effectiveSubUrl.startsWith("file://")) {
+                                                        val clean = try { android.net.Uri.decode(effectiveSubUrl.removePrefix("file://")) } catch (_: Exception) { effectiveSubUrl.removePrefix("file://") }
+                                                        java.io.File(clean)
+                                                    } else null
+
+                                                    if (subLocalFile != null && subLocalFile.exists() && subLocalFile.name.endsWith(".srt", ignoreCase = true)) {
+                                                        readySubUrl = "file://" + subLocalFile.absolutePath
+                                                        android.util.Log.d("Casting", "✅ 기존 로컬 SRT 자막 직접 사용: $readySubUrl")
+                                                    } else {
+                                                        kotlinx.coroutines.runBlocking {
+                                                            val (downUrl, _) = downloadAndProcessSubtitle(
+                                                                context = this@MainActivity,
+                                                                subtitleUrl = effectiveSubUrl,
+                                                                ftpEncoding = state.ftpEncoding,
+                                                                httpHeaders = state.httpHeaders,
+                                                                providedExtension = state.subtitleExtension
+                                                            )
+                                                            readySubUrl = downUrl
+                                                            android.util.Log.d("Casting", "✅ 캐스팅용 자막 다운로드/변환 완료: $readySubUrl")
+                                                        }
+                                                    }
+                                                } catch (e: Exception) {
+                                                    android.util.Log.e("Casting", "자막 사전 준비 실패, 원본 URL 사용: ${e.message}")
+                                                    readySubUrl = effectiveSubUrl
+                                                }
+                                            }
+
                                             try {
                                                 val (streamUrl, streamSubUrl) = httpServer.getStreamableUrl(
                                                     videoUrl,
-                                                    effectiveSubUrl,
+                                                    readySubUrl,
                                                     credentials
                                                 )
                                                 if (streamUrl.isBlank()) {
@@ -4000,7 +3907,8 @@ fun VideoPlayerScreen(
                         
                         // 자동선택 스코어링
                         var score = 0
-                        if (id == "jsplayer_external_sub") {
+                        val isExternalSub = id == "jsplayer_external_sub" || id.startsWith("jsplayer_external_sub") || (trackLabel?.contains("jsplayer_external") == true)
+                        if (isExternalSub) {
                             score = 1000
                         } else if (lang == "ko" || lang == "kor") {
                             score = 500
@@ -4795,6 +4703,22 @@ fun VideoPlayerScreen(
             ) {
                 // Progress Slider (Interactive)
                 if (showProgressBar) {
+                    if (isDragging) {
+                        Box(
+                            modifier = Modifier
+                                .align(androidx.compose.ui.Alignment.CenterHorizontally)
+                                .padding(bottom = 6.dp)
+                                .background(Color.Black.copy(alpha = 0.85f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .border(1.dp, PrimaryColor, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .padding(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "${formatSrtTime(dragPosition).substringBefore(",")} / ${formatSrtTime(totalDuration).substringBefore(",")}",
+                                color = Color.White,
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                            )
+                        }
+                    }
                     Slider(
                         value = if (isDragging) dragPosition.toFloat() else if (vlcTargetSeekPosition != null) vlcTargetSeekPosition!!.toFloat() else currentPosition.toFloat(),
                         enabled = !useVlcFallback || totalDuration > 1000L,
@@ -4825,11 +4749,12 @@ fun VideoPlayerScreen(
                 }
                 
                 if (showPlayTime) {
+                    val displayCurrentTime = if (isDragging) dragPosition else (vlcTargetSeekPosition ?: currentPosition)
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 14.dp),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(formatSrtTime(vlcTargetSeekPosition ?: currentPosition).substringBefore(","), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
+                        Text(formatSrtTime(displayCurrentTime).substringBefore(","), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
                         Text(formatSrtTime(totalDuration).substringBefore(","), color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodySmall)
                     }
                 }
@@ -5153,6 +5078,24 @@ fun VideoPlayerScreen(
                     var isCastDragging by remember { mutableStateOf(false) }
                     var castDragValue by remember { mutableFloatStateOf(0f) }
                     val castProgress = if (isCastDragging) castDragValue else (castPosition.toFloat() / castDuration.toFloat()).coerceIn(0f, 1f)
+                    val currentCastDragTime = (castDragValue * castDuration).toLong()
+
+                    if (isCastDragging) {
+                        Box(
+                            modifier = Modifier
+                                .padding(bottom = 6.dp)
+                                .background(Color.Black.copy(alpha = 0.85f), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .border(1.dp, Color(0xFF4CAF50), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .padding(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "${formatSrtTime(currentCastDragTime).substringBefore(",")} / ${formatSrtTime(castDuration).substringBefore(",")}",
+                                color = Color.White,
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                            )
+                        }
+                    }
+
                     Slider(
                         value = castProgress,
                         onValueChange = { newVal ->
@@ -5176,7 +5119,7 @@ fun VideoPlayerScreen(
                         modifier = Modifier.fillMaxWidth(0.8f),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(formatSrtTime(castPosition).substringBefore(","), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
+                        Text(formatSrtTime(if (isCastDragging) currentCastDragTime else castPosition).substringBefore(","), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
                         Text(formatSrtTime(castDuration).substringBefore(","), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
                     }
 
@@ -6218,16 +6161,21 @@ suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitl
             val encodedUrl = getSafeEncodedUrl(subtitleUrl)
             val uri = android.net.Uri.parse(encodedUrl)
             val userInfo = uri.userInfo
-            val userName = userInfo?.substringBefore(":") ?: ""
-            val password = userInfo?.substringAfter(":") ?: ""
+            val userName = android.net.Uri.decode(userInfo?.substringBefore(":") ?: "")
+            val password = android.net.Uri.decode(userInfo?.substringAfter(":") ?: "")
             
-            val ctx = SmbManager.buildContext(userName, password)
-            val cleanUrl = encodedUrl.replaceFirst(Regex("(?<=smb://).*?@"), "")
-            val file = SmbManager.createSafeSmbFile(cleanUrl, ctx)
-            val stream = file.inputStream
-            val b = stream.readBytesWithLimit()
-            stream.close()
-            b
+            try {
+                val ctx = SmbManager.buildContext(userName, password)
+                val cleanUrl = encodedUrl.replaceFirst(Regex("(?<=smb://).*?@"), "")
+                val file = SmbManager.createSafeSmbFile(cleanUrl, ctx)
+                val stream = file.inputStream
+                val b = stream.readBytesWithLimit()
+                stream.close()
+                b
+            } catch (e: Exception) {
+                android.util.Log.e("SubtitleSearch", "SMB subtitle read failed: ${e.message}", e)
+                null
+            }
         } else if (subtitleUrl.startsWith("http")) {
             val encodedUrl = getSafeEncodedUrl(subtitleUrl)
             val uri = android.net.Uri.parse(encodedUrl)
@@ -6274,12 +6222,22 @@ suspend fun downloadAndProcessSubtitle(context: android.content.Context, subtitl
             
             FtpManager.getFileBytes(host, port, username, password, remotePath, ftpEncoding).getOrNull()
         } else {
-            val path = subtitleUrl.replace("file://", "")
-            val file = java.io.File(path)
+            val rawPath = subtitleUrl.replace("file://", "")
+            val decodedPath = try { android.net.Uri.decode(rawPath) } catch (_: Exception) { rawPath }
+            val file = java.io.File(decodedPath)
             if (file.exists()) {
                 if (file.length() > 10 * 1024 * 1024) throw Exception("Local file exceeds subtitle size limit (10MB).")
                 file.readBytes()
-            } else null
+            } else {
+                val fallbackFile = java.io.File(rawPath)
+                if (fallbackFile.exists()) {
+                    if (fallbackFile.length() > 10 * 1024 * 1024) throw Exception("Local file exceeds subtitle size limit (10MB).")
+                    fallbackFile.readBytes()
+                } else {
+                    android.util.Log.e("SubtitleSearch", "Local subtitle file not found at: $decodedPath (raw: $rawPath)")
+                    null
+                }
+            }
         }
         
         if (bytes == null || bytes.isEmpty()) {
@@ -9041,8 +8999,17 @@ fun parseSrtFile(srtContent: String): List<SubtitleCue> {
         
         val matcher = timePattern.matcher(timeLine)
         if (matcher.find()) {
-            val startMs = matcher.group(1).toLong() * 3600000 + matcher.group(2).toLong() * 60000 + matcher.group(3).toLong() * 1000 + matcher.group(4).toLong()
-            val endMs = matcher.group(5).toLong() * 3600000 + matcher.group(6).toLong() * 60000 + matcher.group(7).toLong() * 1000 + matcher.group(8).toLong()
+            val g1 = matcher.group(1)?.toLongOrNull() ?: 0L
+            val g2 = matcher.group(2)?.toLongOrNull() ?: 0L
+            val g3 = matcher.group(3)?.toLongOrNull() ?: 0L
+            val g4 = matcher.group(4)?.toLongOrNull() ?: 0L
+            val g5 = matcher.group(5)?.toLongOrNull() ?: 0L
+            val g6 = matcher.group(6)?.toLongOrNull() ?: 0L
+            val g7 = matcher.group(7)?.toLongOrNull() ?: 0L
+            val g8 = matcher.group(8)?.toLongOrNull() ?: 0L
+
+            val startMs = g1 * 3600000 + g2 * 60000 + g3 * 1000 + g4
+            val endMs = g5 * 3600000 + g6 * 60000 + g7 * 1000 + g8
             
             val textLines = lines.subList(timeIdx + 1, lines.size)
             val text = textLines.joinToString("\n").trim()
@@ -9062,10 +9029,19 @@ fun parseAssFile(assContent: String): List<SubtitleCue> {
     for (line in lines) {
         val matcher = pattern.matcher(line.trim())
         if (matcher.find()) {
-            val startMs = matcher.group(1).toLong() * 3600000 + matcher.group(2).toLong() * 60000 + matcher.group(3).toLong() * 1000 + matcher.group(4).toLong() * 10
-            val endMs = matcher.group(5).toLong() * 3600000 + matcher.group(6).toLong() * 60000 + matcher.group(7).toLong() * 1000 + matcher.group(8).toLong() * 10
+            val g1 = matcher.group(1)?.toLongOrNull() ?: 0L
+            val g2 = matcher.group(2)?.toLongOrNull() ?: 0L
+            val g3 = matcher.group(3)?.toLongOrNull() ?: 0L
+            val g4 = matcher.group(4)?.toLongOrNull() ?: 0L
+            val g5 = matcher.group(5)?.toLongOrNull() ?: 0L
+            val g6 = matcher.group(6)?.toLongOrNull() ?: 0L
+            val g7 = matcher.group(7)?.toLongOrNull() ?: 0L
+            val g8 = matcher.group(8)?.toLongOrNull() ?: 0L
+
+            val startMs = g1 * 3600000 + g2 * 60000 + g3 * 1000 + g4 * 10
+            val endMs = g5 * 3600000 + g6 * 60000 + g7 * 1000 + g8 * 10
             
-            val rest = matcher.group(9)
+            val rest = matcher.group(9) ?: ""
             val fields = rest.split(",")
             if (fields.size >= 9) {
                 var text = fields.subList(8, fields.size).joinToString(",")

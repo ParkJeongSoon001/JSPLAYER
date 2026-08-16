@@ -132,16 +132,67 @@ class DLNARendererManager(
         service.controlPoint?.search()
         try {
             service.controlPoint?.search(org.jupnp.model.message.header.STAllHeader())
-            val type = org.jupnp.model.types.UDADeviceType("MediaRenderer", 1)
-            service.controlPoint?.search(org.jupnp.model.message.header.UDADeviceTypeHeader(type))
+            val mrType = org.jupnp.model.types.UDADeviceType("MediaRenderer", 1)
+            service.controlPoint?.search(org.jupnp.model.message.header.UDADeviceTypeHeader(mrType))
+            val avType = org.jupnp.model.types.UDAServiceType("AVTransport", 1)
+            service.controlPoint?.search(org.jupnp.model.message.header.UDAServiceTypeHeader(avType))
         } catch (e: Exception) {
             Log.e(TAG, "DMR 검색 오류", e)
         }
+
+        // Direct Raw UDP SSDP M-SEARCH 패킷 발송 (TV 탐색 호환성 극대화)
+        Thread {
+            try {
+                val socket = java.net.MulticastSocket()
+                val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+                var wifiInterface: java.net.NetworkInterface? = null
+                while (interfaces.hasMoreElements()) {
+                    val intf = interfaces.nextElement()
+                    if (intf.isUp && intf.supportsMulticast() && intf.name.startsWith("wlan")) {
+                        val hasIpv4 = intf.inetAddresses.asSequence().any { !it.isLoopbackAddress && it.hostAddress.contains(".") }
+                        if (hasIpv4) {
+                            wifiInterface = intf
+                            break
+                        }
+                        wifiInterface = intf
+                    }
+                }
+                if (wifiInterface != null) {
+                    socket.networkInterface = wifiInterface
+                }
+                socket.timeToLive = 4
+                val targets = listOf(
+                    "urn:schemas-upnp-org:device:MediaRenderer:1",
+                    "urn:schemas-upnp-org:service:AVTransport:1",
+                    "ssdp:all"
+                )
+                val address = java.net.InetAddress.getByName("239.255.255.250")
+                for (st in targets) {
+                    val ssdpMessage = "M-SEARCH * HTTP/1.1\r\n" +
+                            "HOST: 239.255.255.250:1900\r\n" +
+                            "MAN: \"ssdp:discover\"\r\n" +
+                            "MX: 3\r\n" +
+                            "ST: $st\r\n\r\n"
+                    val data = ssdpMessage.toByteArray()
+                    val packet = java.net.DatagramPacket(data, data.size, address, 1900)
+                    socket.send(packet)
+                }
+                socket.close()
+                Log.d(TAG, "Raw SSDP M-SEARCH 패킷 발송 완료")
+            } catch (e: Exception) {
+                Log.e(TAG, "Raw SSDP 패킷 발송 오류", e)
+            }
+        }.start()
     }
 
     /**
      * TV에 영상 URL 전송 (SetAVTransportURI → Play)
      */
+    // 현재 캐스팅 중인 자막 URL (Play 후 벤더 확장 액션에서 사용)
+    private var currentCastSubtitleUrl: String? = null
+    private var currentCastMediaUrl: String? = null
+    private var currentCastTitle: String? = null
+
     fun castToDevice(
         device: Device<*, *, *>,
         mediaUrl: String,
@@ -151,6 +202,10 @@ class DLNARendererManager(
         onSuccess: () -> Unit = {},
         onFailure: (String) -> Unit = {}
     ) {
+        // 자막 URL 저장 (Play 후 벤더 확장에서 사용)
+        currentCastSubtitleUrl = subtitleUrl
+        currentCastMediaUrl = mediaUrl
+        currentCastTitle = title
         val service = upnpService
         if (service == null || !isServiceBound) {
             onFailure("UPnP 서비스가 연결되지 않았습니다.")
@@ -164,7 +219,12 @@ class DLNARendererManager(
         }
 
         val metadata = buildDIDLMetadata(mediaUrl, title, subtitleUrl)
-        Log.d(TAG, "SetAVTransportURI 전송: $mediaUrl (자막: $subtitleUrl)")
+        Log.d(TAG, "━━━ SetAVTransportURI 전송 ━━━")
+        Log.d(TAG, "  mediaUrl: $mediaUrl")
+        Log.d(TAG, "  subtitleUrl: ${subtitleUrl ?: "(없음 → TV 내장 자막 사용)"}")
+        if (subtitleUrl != null) {
+            Log.d(TAG, "  ✅ 외부 자막 최우선 모드: DIDL에 sec:CaptionInfoEx + pv:subtitleFileUri 포함")
+        }
 
         // SetAVTransportURI 실행
         val setUriAction = org.jupnp.model.action.ActionInvocation(avTransport.getAction("SetAVTransportURI"))
@@ -212,7 +272,20 @@ class DLNARendererManager(
                             if (seekSuccess) {
                                 executePlay(device, {}, {})
                             }
+                            // Seek 완료 후 자막 강제 활성화 시도
+                            if (subtitleUrl != null) {
+                                try { Thread.sleep(1500) } catch (_: Exception) {}
+                                trySendSubtitleToTV(device, subtitleUrl)
+                            }
                         }.start()
+                    } else {
+                        // startPositionMs == 0 이고 자막이 있는 경우에도 강제 활성화
+                        if (subtitleUrl != null) {
+                            Thread {
+                                try { Thread.sleep(2000) } catch (_: Exception) {}
+                                trySendSubtitleToTV(device, subtitleUrl)
+                            }.start()
+                        }
                     }
                     onSuccess()
                 }, onFailure = onFailure)
@@ -402,11 +475,99 @@ class DLNARendererManager(
     }
 
     /**
+     * Samsung/LG/TCL TV에 외부 자막 강제 활성화 시도
+     * Play 시작 후 호출하여 TV에 자막을 직접 통보합니다.
+     * 여러 벤더 확장 방식을 순차적으로 시도합니다.
+     */
+    private fun trySendSubtitleToTV(device: Device<*, *, *>, subtitleUrl: String) {
+        val service = upnpService ?: return
+        val avTransport = device.findService(UDAServiceType("AVTransport")) ?: return
+        val deviceName = device.details?.friendlyName ?: device.displayString
+        Log.d(TAG, "━━━ 외부 자막 강제 활성화 시도 ━━━")
+        Log.d(TAG, "  TV: $deviceName")
+        Log.d(TAG, "  자막 URL: $subtitleUrl")
+
+        // 방법 1: SetAVTransportURI 재전송 (자막 메타데이터 포함)
+        // 일부 TV는 첫 SetAVTransportURI 시 자막을 무시하지만,
+        // Play 상태에서 재전송하면 자막을 활성화하는 경우가 있음
+        try {
+            val mediaUrl = currentCastMediaUrl ?: return
+            val title = currentCastTitle ?: "Video"
+            val metadata = buildDIDLMetadata(mediaUrl, title, subtitleUrl)
+            
+            val reSetUri = org.jupnp.model.action.ActionInvocation(avTransport.getAction("SetAVTransportURI"))
+            reSetUri.setInput("InstanceID", UnsignedIntegerFourBytes(0))
+            reSetUri.setInput("CurrentURI", mediaUrl)
+            reSetUri.setInput("CurrentURIMetaData", metadata)
+            
+            service.controlPoint.execute(object : ActionCallback(reSetUri) {
+                override fun success(invocation: ActionInvocation<out Service<*, *>>) {
+                    Log.d(TAG, "✅ [자막 강제] SetAVTransportURI 재전송 성공 → Play 재실행")
+                    // 재전송 후 Play 재실행 (일부 TV는 SetAVTransportURI 후 STOPPED 상태로 전환)
+                    executePlay(device, {
+                        Log.d(TAG, "✅ [자막 강제] Play 재실행 성공")
+                    }, { msg ->
+                        Log.w(TAG, "⚠ [자막 강제] Play 재실행 실패: $msg")
+                    })
+                }
+                override fun failure(invocation: ActionInvocation<out Service<*, *>>?, operation: UpnpResponse?, defaultMsg: String?) {
+                    Log.w(TAG, "⚠ [자막 강제] SetAVTransportURI 재전송 실패: $defaultMsg")
+                }
+            })
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠ [자막 강제] SetAVTransportURI 재전송 예외: ${e.message}")
+        }
+
+        // 방법 2: Samsung TV 전용 - X_SetStealSubtitleURL (일부 모델 지원)
+        try {
+            val stealAction = avTransport.getAction("X_SetStealSubtitleURL")
+            if (stealAction != null) {
+                val action = org.jupnp.model.action.ActionInvocation(stealAction)
+                action.setInput("InstanceID", UnsignedIntegerFourBytes(0))
+                action.setInput("SubtitleURL", subtitleUrl)
+                action.setInput("SubtitleType", "srt")
+                service.controlPoint.execute(object : ActionCallback(action) {
+                    override fun success(invocation: ActionInvocation<out Service<*, *>>) {
+                        Log.d(TAG, "✅ [Samsung] X_SetStealSubtitleURL 성공")
+                    }
+                    override fun failure(invocation: ActionInvocation<out Service<*, *>>?, operation: UpnpResponse?, defaultMsg: String?) {
+                        Log.d(TAG, "ℹ [Samsung] X_SetStealSubtitleURL 미지원: $defaultMsg")
+                    }
+                })
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "ℹ [Samsung] X_SetStealSubtitleURL 시도 실패: ${e.message}")
+        }
+
+        // 방법 3: X_SetCaptionInfo (일부 Samsung/LG 모델)
+        try {
+            val captionAction = avTransport.getAction("X_SetCaptionInfo")
+            if (captionAction != null) {
+                val action = org.jupnp.model.action.ActionInvocation(captionAction)
+                action.setInput("InstanceID", UnsignedIntegerFourBytes(0))
+                action.setInput("CaptionInfoURL", subtitleUrl)
+                service.controlPoint.execute(object : ActionCallback(action) {
+                    override fun success(invocation: ActionInvocation<out Service<*, *>>) {
+                        Log.d(TAG, "✅ [Samsung/LG] X_SetCaptionInfo 성공")
+                    }
+                    override fun failure(invocation: ActionInvocation<out Service<*, *>>?, operation: UpnpResponse?, defaultMsg: String?) {
+                        Log.d(TAG, "ℹ [Samsung/LG] X_SetCaptionInfo 미지원: $defaultMsg")
+                    }
+                })
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "ℹ [Samsung/LG] X_SetCaptionInfo 시도 실패: ${e.message}")
+        }
+
+        Log.d(TAG, "━━━ 외부 자막 강제 활성화 시도 완료 ━━━")
+    }
+
+    /**
      * DIDL-Lite 메타데이터 생성 (자막 URL 포함)
      * 다양한 TV 브랜드 호환:
-     * - Samsung: sec:CaptionInfoEx
-     * - LG/Sony/Platinum: res 엘리먼트 + smi:caption
-     * - Panasonic/Philips: pv:subtitleFileUri
+     * - Samsung: sec:CaptionInfoEx, sec:CaptionInfo
+     * - LG/Sony/Platinum: res 엘리먼트 (application/x-subrip, text/srt) + res_ext:caption
+     * - Panasonic/Philips/TCL: pv:subtitleFileUri, pv:subtitleFileType
      */
     private fun buildDIDLMetadata(mediaUrl: String, title: String, subtitleUrl: String?): String {
         val escapedTitle = title
@@ -423,48 +584,43 @@ class DLNARendererManager(
         // MIME 타입 추정
         val mimeType = guessMimeType(mediaUrl)
 
-        val subtitleElement = if (subtitleUrl != null) {
+        val subtitleElements = if (subtitleUrl != null) {
             val escapedSubUrl = subtitleUrl
                 .replace("&", "&amp;")
                 .replace("<", "&lt;")
                 .replace(">", "&gt;")
-            val subMime = guessSubtitleMimeType(subtitleUrl)
-            // URL에서 실제 자막 포맷 추출
-            val subType = subtitleUrl.substringAfterLast('.').lowercase().let { ext ->
-                when (ext) {
-                    "srt" -> "srt"
-                    "ass", "ssa" -> "ass"
-                    "vtt" -> "vtt"
-                    "smi" -> "smi"
-                    else -> "srt"
-                }
-            }
+            val subMime = "application/x-subrip"
+            val subType = "srt"
             Log.d(TAG, "자막 DIDL 생성: type=$subType, mime=$subMime, url=$escapedSubUrl")
-            // 다양한 TV 호환을 위해 복수의 자막 전달 방식 사용
             buildString {
-                // 1. Samsung TV용: sec:CaptionInfoEx
-                append("""<sec:CaptionInfoEx sec:type="$subType" protocolInfo="http-get:*:$subMime:*">$escapedSubUrl</sec:CaptionInfoEx>""")
-                append("\n            ")
-                // 2. Samsung TV용: sec:CaptionInfo (구형 Samsung)
+                // 1. Samsung TV용: sec:CaptionInfoEx & sec:CaptionInfo
+                append("""<sec:CaptionInfoEx sec:type="$subType" protocolInfo="http-get:*:$subMime:*" sec:enabled="true">$escapedSubUrl</sec:CaptionInfoEx>""")
+                append("\n                ")
                 append("""<sec:CaptionInfo sec:type="$subType">$escapedSubUrl</sec:CaptionInfo>""")
-                append("\n            ")
-                // 3. 표준 DLNA res 엘리먼트 (LG/Sony/Platinum 등)
-                append("""<res protocolInfo="http-get:*:$subMime:DLNA.ORG_OP=01;DLNA.ORG_CI=0">$escapedSubUrl</res>""")
-                append("\n            ")
-                // 4. Panasonic/Philips용: pv:subtitleFileUri
+                append("\n                ")
+                // 2. Panasonic/Philips/TCL용: pv:subtitleFileUri & pv:subtitleFileType
                 append("""<pv:subtitleFileUri>$escapedSubUrl</pv:subtitleFileUri>""")
+                append("\n                ")
+                append("""<pv:subtitleFileType>$subType</pv:subtitleFileType>""")
+                append("\n                ")
+                // 3. 표준 DLNA res 엘리먼트 (LG webOS / Sony / Platinum 등)
+                append("""<res protocolInfo="http-get:*:$subMime:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000">$escapedSubUrl</res>""")
+                append("\n                ")
+                append("""<res protocolInfo="http-get:*:text/srt:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000">$escapedSubUrl</res>""")
             }
         } else {
             Log.d(TAG, "자막 URL이 null입니다 - 외부 자막 없이 전송")
             ""
         }
 
-        return """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:sec="http://www.sec.co.kr/" xmlns:pv="http://www.pv.com/pvns/" xmlns:smi="urn:schemas-smi-com:smi">
+        return """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:sec="http://www.sec.co.kr/" xmlns:pv="http://www.pv.com/pvns/" xmlns:smi="urn:schemas-smi-com:smi" xmlns:res_ext="urn:schemas-dlna-org:metadata-1-0/LD/">
             <item id="0" parentID="-1" restricted="1">
                 <dc:title>$escapedTitle</dc:title>
+                <dc:language>kor</dc:language>
                 <upnp:class>object.item.videoItem</upnp:class>
+                <pv:subtitleLanguage>kor</pv:subtitleLanguage>
                 <res protocolInfo="http-get:*:$mimeType:DLNA.ORG_OP=01;DLNA.ORG_FLAGS=01700000000000000000000000000000">$escapedUrl</res>
-                $subtitleElement
+                $subtitleElements
             </item>
         </DIDL-Lite>"""
     }
