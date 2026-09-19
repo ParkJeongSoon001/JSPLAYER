@@ -184,6 +184,7 @@ class MainActivity : ComponentActivity() {
 
     // ── PIP (Picture-in-Picture) ─────────────────────────────────
     val isInPipMode = mutableStateOf(false)
+    private var wasInPipMode = false
     private var pipExoPlayer: ExoPlayer? = null
     private var isVideoScreenActive = false
 
@@ -1848,6 +1849,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        wasInPipMode = false
+    }
+
     override fun onStart() {
         super.onStart()
         dlnaManager.start()
@@ -1858,6 +1864,12 @@ class MainActivity : ComponentActivity() {
         super.onStop()
         dlnaManager.stop()
         rendererManager.stop()
+        if (isInPipMode.value || wasInPipMode) {
+            pipExoPlayer?.pause()
+            PlayerSingleton.player?.pause()
+            isInPipMode.value = false
+            wasInPipMode = false
+        }
     }
 
     override fun onDestroy() {
@@ -1905,6 +1917,16 @@ class MainActivity : ComponentActivity() {
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: android.content.res.Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         isInPipMode.value = isInPictureInPictureMode
+        if (isInPictureInPictureMode) {
+            wasInPipMode = true
+        } else {
+            // 사용자가 PIP 창의 종료(X) 버튼을 눌러 창을 닫은 경우 (액티비티가 종료되거나 STARTED 이전 상태)
+            if (isFinishing || lifecycle.currentState == androidx.lifecycle.Lifecycle.State.CREATED) {
+                pipExoPlayer?.pause()
+                PlayerSingleton.player?.pause()
+                wasInPipMode = false
+            }
+        }
     }
 
     override fun onUserLeaveHint() {
@@ -2793,7 +2815,10 @@ fun VideoPlayerScreen(
     // --- UI State (isControlVisible는 외부에서 관리됨 — triggerBack에서 컨트롤) ---
     // Button index: 0=이전, 1=-10s, 2=Play/Pause, 3=+10s, 4=다음, 5=Sub-, 6=Sub+, 7=Speed, 8=Close, 9=SeekBar
     var focusedButtonIndex by remember { mutableIntStateOf(2) }
-    var subtitleScale by remember { mutableFloatStateOf(1.0f) }
+    var subtitleScale by remember { mutableFloatStateOf(SettingsStore.getSubtitleScale(context)) }
+    LaunchedEffect(subtitleScale) {
+        SettingsStore.saveSubtitleScale(context, subtitleScale)
+    }
     // 자막 트랙 선택 UI 상태
     var subtitleTrackLabels by remember { mutableStateOf<List<Triple<String, Boolean, androidx.media3.common.TrackGroup>>>(emptyList()) }
     var isSubtitleDisabled by remember { mutableStateOf(false) }
@@ -4131,9 +4156,24 @@ fun VideoPlayerScreen(
                         isLongPressing = true
                         if (useVlcFallback) vlcPlayer.setSpeed(2.0f) else exoPlayer.setPlaybackSpeed(2.0f)
                     },
-                    onTap = {
-                        onControlVisibilityChange(!currentIsControlVisible)
-                        if (!currentIsControlVisible) hideTimerKey++
+                    onTap = { offset ->
+                        val screenWidth = size.width.toFloat()
+                        val screenHeight = size.height.toFloat()
+                        val isCenterArea = offset.x in (screenWidth * 0.25f)..(screenWidth * 0.75f) &&
+                                           offset.y in (screenHeight * 0.20f)..(screenHeight * 0.80f)
+                        if (isCenterArea) {
+                            val currentlyPlaying = if (useVlcFallback) vlcPlayer.isPlaying() else exoPlayer.isPlaying
+                            if (currentlyPlaying) {
+                                if (useVlcFallback) vlcPlayer.pause() else exoPlayer.pause()
+                                onControlVisibilityChange(true)
+                            } else {
+                                if (useVlcFallback) vlcPlayer.resume() else exoPlayer.play()
+                            }
+                            resetHideTimer()
+                        } else {
+                            onControlVisibilityChange(!currentIsControlVisible)
+                            if (!currentIsControlVisible) hideTimerKey++
+                        }
                     },
                     onDoubleTap = { offset ->
                         if (currentIsControlVisible) return@detectTapGestures
@@ -4564,6 +4604,7 @@ fun VideoPlayerScreen(
                     playerView.subtitleView?.setBottomPaddingFraction(
                         if (showOverlay) 0.40f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION
                     )
+
                 },
                 modifier = Modifier
                     .fillMaxSize()
@@ -4574,6 +4615,7 @@ fun VideoPlayerScreen(
                         translationY = zoomOffsetY
                     }
             )
+
         }
 
         // ── VLC LibVLC 폴백 플레이어 ─────────────────────────────────

@@ -150,4 +150,12 @@ object SettingsStore {
     fun saveSubtitleFont(context: Context, font: String?) {
         getPrefs(context).edit().putString("subtitle_font", font).apply()
     }
+
+    fun getSubtitleScale(context: Context): Float {
+        return getPrefs(context).getFloat("subtitle_scale", 1.0f)
+    }
+
+    fun saveSubtitleScale(context: Context, scale: Float) {
+        getPrefs(context).edit().putFloat("subtitle_scale", scale).apply()
+    }
 }
