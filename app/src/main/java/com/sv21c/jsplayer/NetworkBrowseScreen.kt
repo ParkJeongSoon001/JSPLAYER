@@ -760,11 +760,17 @@ private fun handleVideoClick(
 
     // 자막 매칭 헬퍼 (사전 필터링된 리스트에서 검색)
     fun findMatchingSubtitle(mediaNameWithoutExt: String, mediaItem: Any): SubInfo? {
-        return subtitleItems.find { sub ->
+        val matches = subtitleItems.filter { sub ->
             sub.item != mediaItem &&
             (sub.baseName.equals(mediaNameWithoutExt, ignoreCase = true) ||
              (sub.baseName.startsWith(mediaNameWithoutExt, ignoreCase = true) && sub.baseName.getOrNull(mediaNameWithoutExt.length) == '.'))
         }
+        if (matches.isEmpty()) return null
+        
+        return matches.find { it.ext == "ass" || it.ext == "ssa" }
+            ?: matches.find { it.ext == "srt" }
+            ?: matches.find { it.ext == "smi" }
+            ?: matches.first()
     }
 
     // 선택된 파일의 자막 매칭

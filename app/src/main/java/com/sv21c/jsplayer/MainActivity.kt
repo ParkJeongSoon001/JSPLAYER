@@ -2842,6 +2842,7 @@ fun VideoPlayerScreen(
     var hideTimerKey by remember { mutableIntStateOf(0) }
     var isOrientationLocked by remember { mutableStateOf(true) }
     var videoSizeState by remember { mutableStateOf<androidx.media3.common.VideoSize?>(null) }
+    var isAssTrack by remember { mutableStateOf(false) }
     
     // orientation 로직을 별도로 분리하여 상태 변화 시 즉각 적용되도록 함
     LaunchedEffect(isOrientationLocked, videoSizeState) {
@@ -2866,6 +2867,9 @@ fun VideoPlayerScreen(
                     activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 }
             }
+        } else {
+            // videoSize 정보가 없는 경우 (VLC 재생 등), 기본적으로 가로 방향 잠금 처리
+            activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         }
     }
     
@@ -2879,6 +2883,14 @@ fun VideoPlayerScreen(
     var seekIndicatorText by remember { mutableStateOf("") }
     var showSeekIndicator by remember { mutableStateOf(false) }
     var isLongPressing by remember { mutableStateOf(false) }
+    var showCenterPauseIcon by remember { mutableStateOf(false) }
+
+    LaunchedEffect(showCenterPauseIcon) {
+        if (showCenterPauseIcon) {
+            kotlinx.coroutines.delay(500L)
+            showCenterPauseIcon = false
+        }
+    }
 
     LaunchedEffect(showSeekIndicator, isDraggingScreen) {
         if (showSeekIndicator && !isDraggingScreen) {
@@ -3174,6 +3186,7 @@ fun VideoPlayerScreen(
     var lastVideoDecoderName by remember { androidx.compose.runtime.mutableStateOf("") }
     // VLC 폴백 상태 — 모든 Android 디코더 실패 시 VLC LibVLC로 전환
     var useVlcFallback by remember { androidx.compose.runtime.mutableStateOf(false) }
+    var isAssFallback by remember { androidx.compose.runtime.mutableStateOf(false) }
     var vlcTargetSeekPosition by remember { androidx.compose.runtime.mutableStateOf<Long?>(null) }
     var lastSeekTriggerTime by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
     val vlcPlayer = remember {
@@ -3564,16 +3577,21 @@ fun VideoPlayerScreen(
             val savedPos = PlaybackPositionStore.getPosition(context, videoUrl)
             val vlcStartPosition = if (savedPositionForRetry > 0L) savedPositionForRetry else savedPos
             vlcPlayer.setSpeed(currentSpeed)
-            // VLC는 자체적으로 URL을 처리하므로 원본 URL 그대로 전달
-            // getSafeEncodedUrl()을 사용하면 경로의 '='가 '%3D'로 인코딩되어 DLNA 서버가 인식 불가
-            android.util.Log.i("ExoPlayer_Debug", "🎵 VLC에 원본 URL 전달: $videoUrl")
-            vlcPlayer.prepare(android.net.Uri.parse(videoUrl), vlcStartPosition)
+            val vlcSafeUrl = getSafeEncodedUrl(videoUrl)
+            android.util.Log.i("ExoPlayer_Debug", "🎵 VLC에 인코딩된 URL 전달: $vlcSafeUrl")
+            vlcPlayer.prepare(android.net.Uri.parse(vlcSafeUrl), vlcStartPosition)
         }
     }
 
     LaunchedEffect(finalSubtitleUrl, useVlcFallback) {
-        if (useVlcFallback) {
-            android.util.Log.i("ExoPlayer_Debug", "ℹ️ VLC 자체 자막 로드를 건너뛰고 Compose Subtitle Overlay를 활성화합니다. URL: $finalSubtitleUrl")
+        if (useVlcFallback && finalSubtitleUrl != null) {
+            val isAssExternal = finalSubtitleUrl!!.lowercase().endsWith(".ass") || finalSubtitleUrl!!.lowercase().endsWith(".ssa")
+            if (isAssExternal) {
+                android.util.Log.i("ExoPlayer_Debug", "ℹ️ 외부 ASS 자막 감지: VLC 내부 렌더러(libass)를 위해 자막 슬레이브 추가. URL: $finalSubtitleUrl")
+                vlcPlayer.setSubtitle(android.net.Uri.parse(finalSubtitleUrl))
+            } else {
+                android.util.Log.i("ExoPlayer_Debug", "ℹ️ VLC 자체 자막 로드를 건너뛰고 Compose Subtitle Overlay를 활성화합니다. URL: $finalSubtitleUrl")
+            }
         }
     }
 
@@ -3581,6 +3599,18 @@ fun VideoPlayerScreen(
     LaunchedEffect(isSubReady, ffmpegFallbackRetry) {
         if (!isSubReady) return@LaunchedEffect
 
+        // ── ASS/SSA 자막 조기 감지 → VLC 즉시 전환 ──────────────────────
+        val isAssExternal = subtitleExtension?.equals("ass", ignoreCase = true) == true || 
+                            subtitleExtension?.equals("ssa", ignoreCase = true) == true ||
+                            subtitleUrl?.lowercase()?.endsWith(".ass") == true ||
+                            subtitleUrl?.lowercase()?.endsWith(".ssa") == true
+        if (isAssExternal) {
+            android.util.Log.i("ExoPlayer_Debug", "📝 외부 ASS 자막 감지 → ExoPlayer 건너뛰고 완벽한 렌더링을 위해 VLC 즉시 사용")
+            isAssFallback = true
+            useVlcFallback = true
+            return@LaunchedEffect
+        }
+        
         // ── AVI 파일 조기 감지 → VLC 즉시 전환 ──────────────────────
         // AVI+Xvid/DivX는 Android 디코더가 모두 실패하므로 재시도 없이 바로 VLC 사용
         if (!useVlcFallback && ffmpegFallbackRetry == 0) {
@@ -3671,6 +3701,7 @@ fun VideoPlayerScreen(
                 .build()
             mediaItemBuilder.setSubtitleConfigurations(listOf(subtitleConfig))
         }
+
         val mediaItem = mediaItemBuilder.build()
 
         if (isLocalProxyUrl) {
@@ -3731,101 +3762,125 @@ fun VideoPlayerScreen(
         }
     }
 
-    // --- 자막 오프셋 적용 (모든 포맷 지원: SRT/ASS/VTT, 원본 기준 오프셋 계산) ---
+    // --- 자막 오프셋 적용 (SRT/ASS/VTT 포맷 지원, 최초 0L 스킵으로 초기 자막 유실 방지) ---
+    var lastAppliedSubtitleOffsetMs by remember { mutableLongStateOf(0L) }
     LaunchedEffect(subtitleOffsetMs) {
-        val targetSubUrl = originalSubtitleUrl ?: finalSubtitleUrl
+        val requestedOffsetMs = subtitleOffsetMs
+        // 최초 시작 시 0L 오프셋이면 ExoPlayer MediaItem을 재로드하지 않고 건너뜀 (초기 자막 유지)
+        if (requestedOffsetMs == 0L && lastAppliedSubtitleOffsetMs == 0L) {
+            return@LaunchedEffect
+        }
+        val targetSubUrl = finalSubtitleUrl ?: originalSubtitleUrl
         if (targetSubUrl == null) return@LaunchedEffect
         // VLC 모드에서는 VlcSubtitleOverlay에서 실시간 오프셋 처리하므로 ExoPlayer 자막 재로드 불필요
         if (useVlcFallback) return@LaunchedEffect
-        
-        // Debounce: 빠르게 연속 클릭 시 마지막 값만 적용 (200ms 대기)
+
+        // 빠르게 연속 클릭 시 마지막 값만 적용 (200ms 대기)
         kotlinx.coroutines.delay(200L)
-        
+
         var sourceUrl = targetSubUrl
         var subtitlePath = sourceUrl.removePrefix("file://")
         var subtitleFile = java.io.File(subtitlePath)
-        
+        var effectiveSubtitleExt = finalSubtitleExt
+
         // 원본 자막 파일이 로컬에 없거나 네트워크 URL인 경우 다운로드/캐시 시도
         if (!subtitleFile.exists()) {
             android.util.Log.d("VideoPlayerScreen", "원본 자막 파일이 로컬에 없음, 다운로드/캐시 시도: $sourceUrl")
             val (downloadedUrl, downloadedExt) = downloadAndProcessSubtitle(
-                context, sourceUrl, ftpEncoding = ftpEncoding, httpHeaders = httpHeaders, providedExtension = finalSubtitleExt
+                context, sourceUrl, ftpEncoding = ftpEncoding, httpHeaders = httpHeaders, providedExtension = effectiveSubtitleExt
             )
             if (downloadedUrl != null) {
                 sourceUrl = downloadedUrl
                 subtitlePath = sourceUrl.removePrefix("file://")
                 subtitleFile = java.io.File(subtitlePath)
                 if (downloadedExt != null) {
+                    effectiveSubtitleExt = downloadedExt
                     finalSubtitleExt = downloadedExt
                 }
             }
         }
-        
+
         if (!subtitleFile.exists()) {
             android.util.Log.e("VideoPlayerScreen", "자막 파일 존재 안함, 오프셋 적용 불가: $subtitlePath")
             return@LaunchedEffect
         }
-        
-        val ext = finalSubtitleExt?.lowercase() ?: subtitleFile.extension.lowercase()
-        
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            try {
+
+        val ext = effectiveSubtitleExt?.lowercase() ?: subtitleFile.extension.lowercase()
+        val timestamp = System.currentTimeMillis()
+        val offsetFile = try {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 val originalText = subtitleFile.readText(kotlin.text.Charsets.UTF_8)
-                
-                // 오프셋이 0이면 원본 그대로 사용
-                val adjustedText = if (subtitleOffsetMs == 0L) {
+
+                val adjustedText = if (requestedOffsetMs == 0L) {
                     originalText
                 } else {
                     when (ext) {
-                        "ass", "ssa" -> adjustAssTimestamps(originalText, subtitleOffsetMs)
-                        "vtt" -> adjustVttTimestamps(originalText, subtitleOffsetMs)
-                        else -> adjustSrtTimestamps(originalText, subtitleOffsetMs) // srt 및 기타
+                        "ass", "ssa" -> adjustAssTimestamps(originalText, requestedOffsetMs)
+                        "vtt" -> adjustVttTimestamps(originalText, requestedOffsetMs)
+                        else -> adjustSrtTimestamps(originalText, requestedOffsetMs)
                     }
                 }
-                
+
                 val targetExt = if (ext in listOf("ass", "ssa")) "ass" else if (ext == "vtt") "vtt" else "srt"
-                
-                // 이전 임시 자막 오프셋 캐시 파일 청소
+
+                // 이전 임시 자막 오프셋 캐시 파일 정리
                 context.cacheDir.listFiles()?.forEach { file ->
                     if (file.name.startsWith("cached_sub_offset_")) {
                         try { file.delete() } catch (_: Exception) {}
                     }
                 }
-                
-                val timestamp = System.currentTimeMillis()
-                val offsetFile = java.io.File(context.cacheDir, "cached_sub_offset_${timestamp}.$targetExt")
-                offsetFile.writeText(adjustedText, kotlin.text.Charsets.UTF_8)
-                
-                val currentPos = exoPlayer.currentPosition
-                val wasPlaying = exoPlayer.isPlaying
-                
+
+                val file = java.io.File(context.cacheDir, "cached_sub_offset_${timestamp}.$targetExt")
+                file.writeText(adjustedText, kotlin.text.Charsets.UTF_8)
+                file
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.e("VideoPlayerScreen", "자막 오프셋 파일 생성 실패", e)
+            return@LaunchedEffect
+        }
+
+        // ExoPlayer는 메인 스레드에서만 안전하게 조작
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
+            if (subtitleOffsetMs != requestedOffsetMs || useVlcFallback) return@withContext
+
+            try {
                 val mimeType = when (ext) {
                     "ass", "ssa" -> androidx.media3.common.MimeTypes.TEXT_SSA
                     "vtt" -> androidx.media3.common.MimeTypes.TEXT_VTT
                     else -> androidx.media3.common.MimeTypes.APPLICATION_SUBRIP
                 }
-                
-                val newSubUri = android.net.Uri.parse("file://" + offsetFile.absolutePath)
-                val newSubConfig = MediaItem.SubtitleConfiguration.Builder(newSubUri)
+                val newSubConfig = MediaItem.SubtitleConfiguration.Builder(android.net.Uri.fromFile(offsetFile))
                     .setMimeType(mimeType)
                     .setLanguage("ko")
                     .setSelectionFlags(androidx.media3.common.C.SELECTION_FLAG_DEFAULT or androidx.media3.common.C.SELECTION_FLAG_FORCED)
                     .setRoleFlags(androidx.media3.common.C.ROLE_FLAG_SUBTITLE)
-                    .setId("jsplayer_external_sub_${timestamp}")
+                    .setId("jsplayer_external_sub")
                     .build()
-                
-                val currentMediaItem = exoPlayer.currentMediaItem ?: return@withContext
+
+                val currentMediaItem = exoPlayer.currentMediaItem ?: run {
+                    android.util.Log.w("VideoPlayerScreen", "자막 오프셋 적용 시점에 재생 항목이 없습니다.")
+                    return@withContext
+                }
+                val currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
+                val wasPlaying = exoPlayer.isPlaying
                 val newMediaItem = currentMediaItem.buildUpon()
                     .setSubtitleConfigurations(listOf(newSubConfig))
                     .build()
-                
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    exoPlayer.setMediaItem(newMediaItem, false)
-                    exoPlayer.prepare()
-                    exoPlayer.seekTo(currentPos)
-                    exoPlayer.playWhenReady = wasPlaying
-                    android.util.Log.d("VideoPlayerScreen", "자막 오프셋 적용 완료: ${subtitleOffsetMs}ms (포맷=$ext)")
-                }
+
+                exoPlayer.setMediaItem(newMediaItem, currentPositionMs)
+                exoPlayer.prepare()
+                exoPlayer.playWhenReady = wasPlaying
+
+                // 자막 트랙 활성화 보장
+                trackSelector.setParameters(
+                    trackSelector.buildUponParameters()
+                        .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, false)
+                        .setPreferredTextLanguage("ko")
+                )
+                lastAppliedSubtitleOffsetMs = requestedOffsetMs
+                android.util.Log.d("VideoPlayerScreen", "자막 오프셋 적용 완료: ${requestedOffsetMs}ms (포맷=$ext)")
             } catch (e: Exception) {
                 android.util.Log.e("VideoPlayerScreen", "자막 오프셋 적용 실패", e)
             }
@@ -3837,6 +3892,7 @@ fun VideoPlayerScreen(
 
     // 썸네일 비동기 추출 및 알림창 배경 업데이트
     LaunchedEffect(videoUrl) {
+        isAssFallback = false
         val thumbnailUri = ThumbnailExtractor.extractThumbnailUri(context, videoUrl)
         if (thumbnailUri != null) {
             val currentIndex = exoPlayer.currentMediaItemIndex
@@ -4082,10 +4138,12 @@ fun VideoPlayerScreen(
                 }
             }
             2 -> {
-                if (useVlcFallback) {
-                    if (vlcPlayer.isPlaying()) vlcPlayer.pause() else vlcPlayer.resume()
+                val currentlyPlaying = if (useVlcFallback) vlcPlayer.isPlaying() else exoPlayer.isPlaying
+                if (currentlyPlaying) {
+                    showCenterPauseIcon = true
+                    if (useVlcFallback) vlcPlayer.pause() else exoPlayer.pause()
                 } else {
-                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                    if (useVlcFallback) vlcPlayer.resume() else exoPlayer.play()
                 }
             }
             3 -> {
@@ -4136,13 +4194,23 @@ fun VideoPlayerScreen(
         try { focusRequester.requestFocus() } catch (e: Exception) { /* ignore */ }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .focusRequester(focusRequester)
-            .focusable()
-            .pointerInput(Unit) {
+    val currentViewConfig = androidx.compose.ui.platform.LocalViewConfiguration.current
+    val customViewConfig = remember(currentViewConfig) {
+        object : androidx.compose.ui.platform.ViewConfiguration by currentViewConfig {
+            override val doubleTapTimeoutMillis: Long get() = 450L
+        }
+    }
+
+    androidx.compose.runtime.CompositionLocalProvider(
+        androidx.compose.ui.platform.LocalViewConfiguration provides customViewConfig
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .focusRequester(focusRequester)
+                .focusable()
+                .pointerInput(Unit) {
                 detectTapGestures(
                     onPress = { offset ->
                         val released = tryAwaitRelease()
@@ -4161,9 +4229,10 @@ fun VideoPlayerScreen(
                         val screenHeight = size.height.toFloat()
                         val isCenterArea = offset.x in (screenWidth * 0.25f)..(screenWidth * 0.75f) &&
                                            offset.y in (screenHeight * 0.20f)..(screenHeight * 0.80f)
-                        if (isCenterArea) {
+                        if (currentIsControlVisible && isCenterArea) {
                             val currentlyPlaying = if (useVlcFallback) vlcPlayer.isPlaying() else exoPlayer.isPlaying
                             if (currentlyPlaying) {
+                                showCenterPauseIcon = true
                                 if (useVlcFallback) vlcPlayer.pause() else exoPlayer.pause()
                                 onControlVisibilityChange(true)
                             } else {
@@ -4574,6 +4643,7 @@ fun VideoPlayerScreen(
                         player = exoPlayer
                         useController = false // Use custom TV controller
                         keepScreenOn = true // 재생 중 화면 꺼짐 방지
+                        subtitleView?.visibility = android.view.View.VISIBLE
                         subtitleView?.setStyle(
                             androidx.media3.ui.CaptionStyleCompat(
                                 android.graphics.Color.WHITE,
@@ -4592,19 +4662,61 @@ fun VideoPlayerScreen(
                             override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
                                 videoSizeState = videoSize
                             }
+                            
+                            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                                var foundAss = false
+                                for (group in tracks.groups) {
+                                    if (group.type == androidx.media3.common.C.TRACK_TYPE_TEXT && group.isSelected) {
+                                        for (i in 0 until group.mediaTrackGroup.length) {
+                                            if (group.isTrackSelected(i)) {
+                                                val format = group.mediaTrackGroup.getFormat(i)
+                                                val mime = format.sampleMimeType?.lowercase() ?: ""
+                                                if (mime.contains("ssa") || mime.contains("ass")) {
+                                                    foundAss = true
+                                                    break
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if (foundAss && !useVlcFallback) {
+                                    android.util.Log.i("ExoPlayer_Debug", "📝 내장 ASS 자막 감지 → ExoPlayer 렌더링 한계로 인해 즉시 VLC로 폴백합니다.")
+                                    isAssFallback = true
+                                    useVlcFallback = true
+                                }
+                            }
                         })
                     }
                 },
                 update = { playerView ->
+                    val subExt = subtitleExtension
+                    val subUrl = subtitleUrl
+                    val isAss = isAssTrack ||
+                                subExt?.equals("ass", ignoreCase = true) == true || 
+                                subExt?.equals("ssa", ignoreCase = true) == true ||
+                                subUrl?.lowercase()?.endsWith(".ass") == true ||
+                                subUrl?.lowercase()?.endsWith(".ssa") == true
+                                
+                    playerView.subtitleView?.setViewType(
+                        if (isAss) androidx.media3.ui.SubtitleView.VIEW_TYPE_WEB
+                        else androidx.media3.ui.SubtitleView.VIEW_TYPE_CANVAS
+                    )
+                    
                     playerView.subtitleView?.setFractionalTextSize(
                         androidx.media3.ui.SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * subtitleScale
                     )
                     
                     val showOverlay = isControlVisible && (mainActivity?.isInPipMode?.value != true)
                     playerView.subtitleView?.setBottomPaddingFraction(
-                        if (showOverlay) 0.40f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION
+                        if (showOverlay) 0.45f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION
                     )
-
+                    
+                    if (isAss) {
+                        val offset = if (showOverlay) -(playerView.height * 0.30f) else 0f
+                        playerView.subtitleView?.translationY = offset
+                    } else {
+                        playerView.subtitleView?.translationY = 0f
+                    }
                 },
                 modifier = Modifier
                     .fillMaxSize()
@@ -4623,7 +4735,22 @@ fun VideoPlayerScreen(
         // surfaceChanged에서 실제 화면 크기를 받은 후 재생 시작 → 전체 화면 보장
         if (useVlcFallback) {
             exoPlayer.pause()
-            Box(modifier = Modifier.fillMaxSize()) {
+            vlcPlayer.isAssSubtitleActive = isAssFallback
+            
+            // VLC 내장 ASS 렌더러(libass)는 자막을 영상 위에 직접 합성하므로 자막만 따로 움직일 수 없습니다.
+            // 컨트롤바가 나오면 영상 자체를 위로 살짝 올려 자막이 가리지 않도록 합니다.
+            val showOverlay = isControlVisible && (mainActivity?.isInPipMode?.value != true)
+            val targetVlcYOffset = if (showOverlay && isAssFallback) (-100).dp else 0.dp
+            val vlcYOffset = androidx.compose.animation.core.animateDpAsState(
+                targetValue = targetVlcYOffset,
+                animationSpec = androidx.compose.animation.core.tween(durationMillis = 300)
+            ).value
+            
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .offset(y = vlcYOffset)
+            ) {
                 AndroidView(
                     factory = { ctx ->
                         android.view.SurfaceView(ctx).also { sv ->
@@ -4645,15 +4772,22 @@ fun VideoPlayerScreen(
                     modifier = Modifier.fillMaxSize()
                 )
 
-                // VLC 재생 시 Compose 기반 자막 오버레이 추가
+                // VLC 재생 시 Compose 기반 자막 오버레이 추가 (ASS/SSA는 제외)
                 if (!finalSubtitleUrl.isNullOrEmpty()) {
-                    VlcSubtitleOverlay(
-                        subtitleUrl = finalSubtitleUrl!!,
-                        subtitleExt = finalSubtitleExt,
-                        vlcPlayer = vlcPlayer,
-                        subtitleScale = subtitleScale,
-                        subtitleOffsetMs = subtitleOffsetMs
-                    )
+                    val isAssOverlay = finalSubtitleExt?.equals("ass", ignoreCase = true) == true || 
+                                       finalSubtitleExt?.equals("ssa", ignoreCase = true) == true ||
+                                       finalSubtitleUrl!!.lowercase().endsWith(".ass") || 
+                                       finalSubtitleUrl!!.lowercase().endsWith(".ssa")
+                    if (!isAssOverlay) {
+                        VlcSubtitleOverlay(
+                            subtitleUrl = finalSubtitleUrl!!,
+                            subtitleExt = finalSubtitleExt,
+                            vlcPlayer = vlcPlayer,
+                            subtitleScale = subtitleScale,
+                            subtitleOffsetMs = subtitleOffsetMs,
+                            isControlVisible = isControlVisible && (mainActivity?.isInPipMode?.value != true)
+                        )
+                    }
                 }
 
                 // 오디오 파일인 경우 VLC SurfaceView 위에 덮어씌움
@@ -4670,9 +4804,6 @@ fun VideoPlayerScreen(
             }
             DisposableEffect(Unit) { onDispose { vlcPlayer.releaseMediaPlayer() } }
         }
-
-
-
 
         // --- Zoom Indicator (상단 중앙) ---
 
@@ -4882,12 +5013,33 @@ fun VideoPlayerScreen(
             }
         }
 
+        // --- Center Pause Indicator ---
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showCenterPauseIcon,
+            enter = androidx.compose.animation.scaleIn(androidx.compose.animation.core.tween(200)) + androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(200)),
+            exit = androidx.compose.animation.scaleOut(androidx.compose.animation.core.tween(200)) + androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(200)),
+            modifier = Modifier.align(androidx.compose.ui.Alignment.Center)
+        ) {
+            Box(
+                modifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.5f), androidx.compose.foundation.shape.CircleShape)
+                    .padding(32.dp),
+                contentAlignment = androidx.compose.ui.Alignment.Center
+            ) {
+                Text(
+                    text = "⏸",
+                    color = Color.White,
+                    fontSize = 64.sp
+                )
+            }
+        }
+
         // --- Long Press 2X Indicator ---
         androidx.compose.animation.AnimatedVisibility(
             visible = isLongPressing,
             enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(150)),
             exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(300)),
-            modifier = Modifier.align(androidx.compose.ui.Alignment.TopCenter).padding(top = 48.dp)
+            modifier = Modifier.align(androidx.compose.ui.Alignment.TopCenter).padding(top = 16.dp)
         ) {
             Box(
                 modifier = Modifier
@@ -5238,6 +5390,7 @@ fun VideoPlayerScreen(
             }
         }
     }
+    } // End of CompositionLocalProvider
 
     // ── 렌더러 선택 다이얼로그 ──────────────────────────────────────
     if (showRendererDialog) {
@@ -6129,7 +6282,7 @@ fun getSafeEncodedUrl(url: String): String {
             val decodedPath = android.net.Uri.decode(path)
             val segments = decodedPath.split("/")
             segments.joinToString("/") { segment ->
-                android.net.Uri.encode(segment)
+                android.net.Uri.encode(segment, "=+")
             }
         } else {
             ""
@@ -8912,6 +9065,7 @@ fun VlcSubtitleOverlay(
     vlcPlayer: VlcPlayerWrapper,
     subtitleScale: Float,
     subtitleOffsetMs: Long = 0L,
+    isControlVisible: Boolean = false,
     modifier: androidx.compose.ui.Modifier = androidx.compose.ui.Modifier
 ) {
     var subtitleCues by androidx.compose.runtime.remember(subtitleUrl) { 
@@ -8976,10 +9130,15 @@ fun VlcSubtitleOverlay(
     }
     
     if (currentText.isNotEmpty()) {
+        val targetBottomPadding = if (isControlVisible) 180.dp else 64.dp
+        val bottomPadding = androidx.compose.animation.core.animateDpAsState(
+            targetValue = targetBottomPadding,
+            animationSpec = androidx.compose.animation.core.tween(durationMillis = 300)
+        ).value
         Box(
             modifier = modifier
                 .fillMaxSize()
-                .padding(bottom = 64.dp),
+                .padding(bottom = bottomPadding),
             contentAlignment = androidx.compose.ui.Alignment.BottomCenter
         ) {
             Box(
@@ -9099,4 +9258,3 @@ fun parseAssFile(assContent: String): List<SubtitleCue> {
     }
     return cues
 }
-
