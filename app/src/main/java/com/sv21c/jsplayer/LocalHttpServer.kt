@@ -456,7 +456,10 @@ class LocalHttpServer(
             }
 
             val lowerText = text.lowercase()
-            val isSmi = lowerText.contains("<sami") || file.extension.lowercase() == "smi"
+            val extension = file.extension.lowercase()
+            val isSmi = lowerText.contains("<sami") || extension == "smi"
+            val isAss = extension in setOf("ass", "ssa") ||
+                lowerText.contains("[events]") || lowerText.contains("dialogue:")
 
             if (isSmi) {
                 val srtText = convertSmiToSrt(text)
@@ -464,6 +467,16 @@ class LocalHttpServer(
                 cacheFile.writeText(srtText, kotlin.text.Charsets.UTF_8)
                 targetFile = cacheFile
                 Log.d(TAG, "✅ [캐스팅 자막 변환] SMI → SRT 변환 완료: ${cacheFile.absolutePath}")
+            } else if (isAss) {
+                val srtText = convertAssToSrt(text)
+                if (srtText.isBlank()) {
+                    Log.e(TAG, "ASS/SSA 자막에서 표시할 Dialogue 항목을 찾지 못했습니다: $subtitlePath")
+                    return ""
+                }
+                val cacheFile = File(context.cacheDir, "cast_ass_converted_${System.currentTimeMillis()}.srt")
+                cacheFile.writeText(srtText, kotlin.text.Charsets.UTF_8)
+                targetFile = cacheFile
+                Log.d(TAG, "✅ [캐스팅 자막 변환] ASS/SSA → SRT 변환 완료: ${cacheFile.absolutePath}")
             } else {
                 val cacheFile = File(context.cacheDir, "cast_utf8_${System.currentTimeMillis()}.srt")
                 cacheFile.writeText(text, kotlin.text.Charsets.UTF_8)
@@ -493,17 +506,29 @@ class LocalHttpServer(
     /**
      * HTTP URL (이미 접근 가능한 URL)인 경우 그대로 반환
      */
-    fun getStreamableUrl(videoUrl: String, subtitleUrl: String?, credentials: ServerCredentials?): Pair<String, String?> {
+    fun getStreamableUrl(
+        videoUrl: String,
+        subtitleUrl: String?,
+        credentials: ServerCredentials?,
+        forceHttpVideoProxy: Boolean = false
+    ): Pair<String, String?> {
         val safeVideoUrl = getSafeEncodedUrl(videoUrl)
         val safeSubtitleUrl = subtitleUrl?.let { getSafeEncodedUrl(it) }
 
         val parsedUri = android.net.Uri.parse(safeVideoUrl)
         val scheme = parsedUri.scheme?.lowercase() ?: ""
         val fileName = parsedUri.lastPathSegment ?: "video"
+        val proxyableVideoExtensions = setOf(
+            "mkv", "mp4", "m4v", "avi", "mov", "wmv", "flv", "ts", "webm", "3gp", "mpg", "mpeg", "m2ts"
+        )
+        val shouldProxyHttpVideoForSubtitle = (forceHttpVideoProxy || !safeSubtitleUrl.isNullOrBlank()) &&
+            !safeVideoUrl.startsWith(getServerUrl()) &&
+            fileName.substringAfterLast('.', "").lowercase() in proxyableVideoExtensions
 
         Log.d(TAG, "━━━ getStreamableUrl ━━━")
         Log.d(TAG, "videoUrl: $safeVideoUrl")
         Log.d(TAG, "subtitleUrl: $safeSubtitleUrl")
+        Log.d(TAG, "forceHttpVideoProxy: $forceHttpVideoProxy")
         Log.d(TAG, "scheme: $scheme, credentials: ${if (credentials != null) "있음(user=${credentials.username})" else "없음"}")
 
         val streamVideoUrl = when {
@@ -511,6 +536,12 @@ class LocalHttpServer(
             scheme.startsWith("http") && credentials != null -> {
                 Log.d(TAG, "WebDAV URL 감지 → 프록시를 통해 전달")
                 registerWebDavFile(safeVideoUrl, credentials.username, credentials.password, fileName)
+            }
+            // 원격 HTTP 동영상은 그대로 TV에 전달하면 앱이 응답 헤더에 CaptionInfo를 붙일 수 없다.
+            // 외부 자막이 있을 때만 로컬 범위요청 프록시를 경유시켜 DIDL과 HTTP 응답 양쪽에 자막 URL을 제공한다.
+            scheme.startsWith("http") && shouldProxyHttpVideoForSubtitle -> {
+                Log.d(TAG, "외부 자막 감지 → CaptionInfo 헤더 제공을 위해 영상 HTTP 프록시 사용")
+                registerWebDavFile(safeVideoUrl, "", "", fileName)
             }
             // 일반 HTTP URL (DLNA 등) → 그대로 사용
             scheme.startsWith("http") -> {
@@ -581,15 +612,16 @@ class LocalHttpServer(
                 else -> safeSubtitleUrl
             }
         } else null
+        val usableStreamSubtitleUrl = streamSubtitleUrl?.takeIf { it.isNotBlank() }
 
         // 비디오 소스에 자막 HTTP URL 바인딩 (삼성/LG TV 자동 자막 인식용)
-        if (streamSubtitleUrl != null && streamVideoUrl.startsWith(getServerUrl())) {
+        if (usableStreamSubtitleUrl != null && streamVideoUrl.startsWith(getServerUrl())) {
             val videoToken = streamVideoUrl.removePrefix("${getServerUrl()}/stream/").substringBefore("/")
-            streamSources[videoToken]?.subtitleHttpUrl = streamSubtitleUrl
-            Log.d(TAG, "🔗 비디오 소스($videoToken)에 자막 URL 바인딩: $streamSubtitleUrl")
+            streamSources[videoToken]?.subtitleHttpUrl = usableStreamSubtitleUrl
+            Log.d(TAG, "🔗 비디오 소스($videoToken)에 자막 URL 바인딩: $usableStreamSubtitleUrl")
         }
 
-        return Pair(streamVideoUrl, streamSubtitleUrl)
+        return Pair(streamVideoUrl, usableStreamSubtitleUrl)
     }
 
     /**

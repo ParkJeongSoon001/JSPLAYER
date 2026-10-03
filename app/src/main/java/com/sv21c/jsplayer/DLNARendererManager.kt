@@ -18,6 +18,8 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.net.wifi.WifiManager
 import android.os.IBinder
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.Locale
 
 /**
@@ -188,11 +190,6 @@ class DLNARendererManager(
     /**
      * TV에 영상 URL 전송 (SetAVTransportURI → Play)
      */
-    // 현재 캐스팅 중인 자막 URL (Play 후 벤더 확장 액션에서 사용)
-    private var currentCastSubtitleUrl: String? = null
-    private var currentCastMediaUrl: String? = null
-    private var currentCastTitle: String? = null
-
     fun castToDevice(
         device: Device<*, *, *>,
         mediaUrl: String,
@@ -202,10 +199,6 @@ class DLNARendererManager(
         onSuccess: () -> Unit = {},
         onFailure: (String) -> Unit = {}
     ) {
-        // 자막 URL 저장 (Play 후 벤더 확장에서 사용)
-        currentCastSubtitleUrl = subtitleUrl
-        currentCastMediaUrl = mediaUrl
-        currentCastTitle = title
         val service = upnpService
         if (service == null || !isServiceBound) {
             onFailure("UPnP 서비스가 연결되지 않았습니다.")
@@ -223,7 +216,7 @@ class DLNARendererManager(
         Log.d(TAG, "  mediaUrl: $mediaUrl")
         Log.d(TAG, "  subtitleUrl: ${subtitleUrl ?: "(없음 → TV 내장 자막 사용)"}")
         if (subtitleUrl != null) {
-            Log.d(TAG, "  ✅ 외부 자막 최우선 모드: DIDL에 sec:CaptionInfoEx + pv:subtitleFileUri 포함")
+            Log.d(TAG, "  ✅ 외부 자막 메타데이터: sec:CaptionInfoEx + res@pv:subtitleFileUri + upnp:resExt Caption")
         }
 
         // SetAVTransportURI 실행
@@ -235,42 +228,31 @@ class DLNARendererManager(
         service.controlPoint.execute(object : ActionCallback(setUriAction) {
             override fun success(invocation: ActionInvocation<out Service<*, *>>) {
                 Log.d(TAG, "SetAVTransportURI 성공!")
-                // 많은 스마트TV가 SetAVTransportURI 직후 STOPPED 상태에서 직접적인 Seek를 거부할 수 있으므로,
-                // 우선 Play를 실행한 뒤, 성공할 때까지 주기적으로 Seek 명령을 보냅니다.
+                // 많은 스마트TV가 SetAVTransportURI 직후 STOPPED 상태에서 직접적인 Seek를 거부하므로,
+                // 먼저 Play를 시작하고 실제 TV의 위치가 목표 위치로 이동했는지 확인합니다.
                 executePlay(device, onSuccess = {
                     if (startPositionMs > 0L) {
                         Thread {
                             var retries = 0
                             var seekSuccess = false
-                            while (retries < 15 && !seekSuccess) {
-                                try { Thread.sleep(1000) } catch (e: Exception) {}
-                                
-                                val formattedTime = formatTimeForDLNA(startPositionMs)
-                                Log.d(TAG, "이전 재생 위치로 Seek 시도 ($retries/15): $formattedTime")
-                                
-                                var callDone = false
-                                seek(device, startPositionMs) { success, msg ->
-                                    if (success) {
-                                        seekSuccess = true
-                                        Log.d(TAG, "Seek 정상 수행 완료!")
-                                    } else {
-                                        Log.d(TAG, "Seek 준비 안 됨, 재시도 대기... msg=$msg")
-                                    }
-                                    callDone = true
+                            val formattedTime = formatTimeForDLNA(startPositionMs)
+                            while (retries < 8 && !seekSuccess) {
+                                try { Thread.sleep(750) } catch (e: InterruptedException) {
+                                    Thread.currentThread().interrupt()
+                                    break
                                 }
                                 
-                                // UPnP 비동기 응답 대기 (최대 3초)
-                                var waitCount = 0
-                                while (!callDone && waitCount < 30) {
-                                    try { Thread.sleep(100) } catch (e: Exception) {}
-                                    waitCount++
-                                }
+                                Log.d(TAG, "이전 재생 위치로 Seek 및 TV 위치 확인 시도 (${retries + 1}/8): $formattedTime")
+                                seekSuccess = seekAndConfirmPosition(device, startPositionMs)
+                                if (!seekSuccess) Log.d(TAG, "TV가 목표 위치로 이동하지 않음, 잠시 후 재시도")
                                 retries++
                             }
                             
-                            // Seek 성공 직후, 버퍼링이나 중단 상태에 빠지는 것을 막기 위해 다시 Play 전송
+                            // Seek 후 TV가 재생을 멈추는 모델을 위해 확인이 끝난 뒤 Play를 재전송합니다.
                             if (seekSuccess) {
                                 executePlay(device, {}, {})
+                            } else {
+                                Log.e(TAG, "재생 위치 복원 실패: TV가 $formattedTime 위치 이동을 확인해주지 않았습니다.")
                             }
                             // Seek 완료 후 자막 강제 활성화 시도
                             if (subtitleUrl != null) {
@@ -373,8 +355,16 @@ class DLNARendererManager(
      * Seek 명령
      */
     fun seek(device: Device<*, *, *>, positionMs: Long, onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
-        val service = upnpService ?: return
-        val avTransport = device.findService(UDAServiceType("AVTransport")) ?: return
+        val service = upnpService
+        if (service == null) {
+            onResult(false, "UPnP 서비스가 연결되지 않았습니다.")
+            return
+        }
+        val avTransport = device.findService(UDAServiceType("AVTransport"))
+        if (avTransport == null) {
+            onResult(false, "AVTransport 서비스를 찾을 수 없습니다.")
+            return
+        }
 
         val seekAction = org.jupnp.model.action.ActionInvocation(avTransport.getAction("Seek"))
         seekAction.setInput("InstanceID", UnsignedIntegerFourBytes(0))
@@ -392,6 +382,45 @@ class DLNARendererManager(
         })
     }
 
+    /** A successful UPnP Seek response does not guarantee that the TV actually moved. */
+    private fun seekAndConfirmPosition(device: Device<*, *, *>, targetPositionMs: Long): Boolean {
+        val seekFinished = CountDownLatch(1)
+        var seekAccepted = false
+        seek(device, targetPositionMs) { success, message ->
+            seekAccepted = success
+            if (!success) Log.d(TAG, "TV Seek 거부: $message")
+            seekFinished.countDown()
+        }
+        if (!seekFinished.await(3, TimeUnit.SECONDS) || !seekAccepted) return false
+
+        try {
+            Thread.sleep(600)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return false
+        }
+
+        val positionFinished = CountDownLatch(1)
+        var actualPositionMs = -1L
+        getPositionInfo(
+            device = device,
+            onResult = { positionMs, _ ->
+                actualPositionMs = positionMs
+                positionFinished.countDown()
+            },
+            onFailure = { positionFinished.countDown() }
+        )
+        if (!positionFinished.await(3, TimeUnit.SECONDS) || actualPositionMs < 0L) return false
+
+        val differenceMs = kotlin.math.abs(actualPositionMs - targetPositionMs)
+        val confirmed = differenceMs <= 3_000L
+        Log.d(
+            TAG,
+            "TV 위치 확인: 목표=${formatTimeForDLNA(targetPositionMs)}, 실제=${formatTimeForDLNA(actualPositionMs)}, 확인=$confirmed"
+        )
+        return confirmed
+    }
+
     /**
      * 재생 위치 정보 조회 (GetPositionInfo)
      */
@@ -400,8 +429,16 @@ class DLNARendererManager(
         onResult: (positionMs: Long, durationMs: Long) -> Unit,
         onFailure: () -> Unit = {}
     ) {
-        val service = upnpService ?: return
-        val avTransport = device.findService(UDAServiceType("AVTransport")) ?: return
+        val service = upnpService
+        if (service == null) {
+            onFailure()
+            return
+        }
+        val avTransport = device.findService(UDAServiceType("AVTransport"))
+        if (avTransport == null) {
+            onFailure()
+            return
+        }
 
         val posAction = org.jupnp.model.action.ActionInvocation(avTransport.getAction("GetPositionInfo"))
         posAction.setInput("InstanceID", UnsignedIntegerFourBytes(0))
@@ -475,9 +512,8 @@ class DLNARendererManager(
     }
 
     /**
-     * Samsung/LG/TCL TV에 외부 자막 강제 활성화 시도
-     * Play 시작 후 호출하여 TV에 자막을 직접 통보합니다.
-     * 여러 벤더 확장 방식을 순차적으로 시도합니다.
+     * 외부 자막은 첫 SetAVTransportURI의 DIDL 메타데이터에 포함합니다.
+     * 이후 지원되는 벤더 액션/RenderingControl 변환만 시도하고 URI는 재설정하지 않습니다.
      */
     private fun trySendSubtitleToTV(device: Device<*, *, *>, subtitleUrl: String) {
         val service = upnpService ?: return
@@ -487,38 +523,9 @@ class DLNARendererManager(
         Log.d(TAG, "  TV: $deviceName")
         Log.d(TAG, "  자막 URL: $subtitleUrl")
 
-        // 방법 1: SetAVTransportURI 재전송 (자막 메타데이터 포함)
-        // 일부 TV는 첫 SetAVTransportURI 시 자막을 무시하지만,
-        // Play 상태에서 재전송하면 자막을 활성화하는 경우가 있음
-        try {
-            val mediaUrl = currentCastMediaUrl ?: return
-            val title = currentCastTitle ?: "Video"
-            val metadata = buildDIDLMetadata(mediaUrl, title, subtitleUrl)
-            
-            val reSetUri = org.jupnp.model.action.ActionInvocation(avTransport.getAction("SetAVTransportURI"))
-            reSetUri.setInput("InstanceID", UnsignedIntegerFourBytes(0))
-            reSetUri.setInput("CurrentURI", mediaUrl)
-            reSetUri.setInput("CurrentURIMetaData", metadata)
-            
-            service.controlPoint.execute(object : ActionCallback(reSetUri) {
-                override fun success(invocation: ActionInvocation<out Service<*, *>>) {
-                    Log.d(TAG, "✅ [자막 강제] SetAVTransportURI 재전송 성공 → Play 재실행")
-                    // 재전송 후 Play 재실행 (일부 TV는 SetAVTransportURI 후 STOPPED 상태로 전환)
-                    executePlay(device, {
-                        Log.d(TAG, "✅ [자막 강제] Play 재실행 성공")
-                    }, { msg ->
-                        Log.w(TAG, "⚠ [자막 강제] Play 재실행 실패: $msg")
-                    })
-                }
-                override fun failure(invocation: ActionInvocation<out Service<*, *>>?, operation: UpnpResponse?, defaultMsg: String?) {
-                    Log.w(TAG, "⚠ [자막 강제] SetAVTransportURI 재전송 실패: $defaultMsg")
-                }
-            })
-        } catch (e: Exception) {
-            Log.w(TAG, "⚠ [자막 강제] SetAVTransportURI 재전송 예외: ${e.message}")
-        }
-
-        // 방법 2: Samsung TV 전용 - X_SetStealSubtitleURL (일부 모델 지원)
+        // 첫 SetAVTransportURI에 sec:CaptionInfoEx / pv:subtitleFileUri가 포함되어 있으므로
+        // 이를 다시 보내 재생 위치를 초기화하지 않고, 지원되는 캡션 액션만 호출합니다.
+        // Samsung TV 전용 - X_SetStealSubtitleURL (일부 모델 지원)
         try {
             val stealAction = avTransport.getAction("X_SetStealSubtitleURL")
             if (stealAction != null) {
@@ -539,7 +546,7 @@ class DLNARendererManager(
             Log.d(TAG, "ℹ [Samsung] X_SetStealSubtitleURL 시도 실패: ${e.message}")
         }
 
-        // 방법 3: X_SetCaptionInfo (일부 Samsung/LG 모델)
+        // X_SetCaptionInfo (일부 Samsung/LG 모델)
         try {
             val captionAction = avTransport.getAction("X_SetCaptionInfo")
             if (captionAction != null) {
@@ -559,7 +566,102 @@ class DLNARendererManager(
             Log.d(TAG, "ℹ [Samsung/LG] X_SetCaptionInfo 시도 실패: ${e.message}")
         }
 
-        Log.d(TAG, "━━━ 외부 자막 강제 활성화 시도 완료 ━━━")
+        // Generic DLNA renderers may ignore Samsung/Panasonic caption extensions. If the
+        // renderer exposes RenderingControl:3 transforms, explicitly request Korean subtitles.
+        trySetSubtitleTransform(device, subtitleUrl)
+
+        Log.d(TAG, "━━━ 외부 자막 메타데이터 전달 완료 (TV의 실제 표시 여부는 확인 불가) ━━━")
+    }
+
+    /** Select the external caption language on renderers that implement RenderingControl transforms. */
+    private fun trySetSubtitleTransform(device: Device<*, *, *>, subtitleUrl: String) {
+        val renderingControl = device.findService(UDAServiceType("RenderingControl"))
+        if (renderingControl == null) {
+            Log.d(TAG, "ℹ [UPnP] RenderingControl 서비스 없음 — 표준 자막 선택 변환 미지원")
+            return
+        }
+
+        val getAllowedAction = renderingControl.getAction("GetAllowedTransforms")
+        val setTransformsAction = renderingControl.getAction("SetTransforms")
+        if (getAllowedAction == null || setTransformsAction == null) {
+            Log.d(TAG, "ℹ [UPnP] RenderingControl 자막 변환 액션 미지원 (GetAllowedTransforms/SetTransforms)")
+            return
+        }
+
+        val service = upnpService ?: return
+        val getAllowed = org.jupnp.model.action.ActionInvocation(getAllowedAction)
+        getAllowed.setInput("InstanceID", UnsignedIntegerFourBytes(0))
+        service.controlPoint.execute(object : ActionCallback(getAllowed) {
+            override fun success(invocation: ActionInvocation<out Service<*, *>>) {
+                val allowedXml = invocation.getOutput("CurrentAllowedTransformSettings")
+                    ?.value?.toString().orEmpty()
+                val allowedValues = readSubtitleTransformValues(allowedXml)
+                val selectedLanguage = allowedValues.firstOrNull { it.equals("ko", ignoreCase = true) }
+                    ?: allowedValues.firstOrNull { it.startsWith("ko-", ignoreCase = true) }
+                if (selectedLanguage == null) {
+                    Log.d(TAG, "ℹ [UPnP] TV에서 한국어 자막 변환을 허용하지 않음: $allowedValues")
+                    return
+                }
+
+                val transformXml = """<?xml version="1.0" encoding="UTF-8"?>
+                    |<TransformSettings xmlns="urn:schemas-upnp-org:av:TransformSettings">
+                    |  <transform name="Subtitle"><value>$selectedLanguage</value></transform>
+                    |</TransformSettings>""".trimMargin()
+                val setTransforms = org.jupnp.model.action.ActionInvocation(setTransformsAction)
+                setTransforms.setInput("InstanceID", UnsignedIntegerFourBytes(0))
+                setTransforms.setInput("DesiredTransformValues", transformXml)
+                Log.d(TAG, "[UPnP] TV 한국어 자막 선택 요청: lang=$selectedLanguage, url=$subtitleUrl")
+                service.controlPoint.execute(object : ActionCallback(setTransforms) {
+                    override fun success(invocation: ActionInvocation<out Service<*, *>>) {
+                        Log.d(TAG, "✅ [UPnP] RenderingControl Subtitle=$selectedLanguage 적용 응답")
+                    }
+
+                    override fun failure(
+                        invocation: ActionInvocation<out Service<*, *>>?,
+                        operation: UpnpResponse?,
+                        defaultMsg: String?
+                    ) {
+                        Log.w(TAG, "⚠ [UPnP] RenderingControl 자막 선택 실패: $defaultMsg")
+                    }
+                })
+            }
+
+            override fun failure(
+                invocation: ActionInvocation<out Service<*, *>>?,
+                operation: UpnpResponse?,
+                defaultMsg: String?
+            ) {
+                Log.w(TAG, "⚠ [UPnP] TV 자막 변환 목록 조회 실패: $defaultMsg")
+            }
+        })
+    }
+
+    private fun readSubtitleTransformValues(transformXml: String): List<String> {
+        if (transformXml.isBlank()) return emptyList()
+        return try {
+            val parser = android.util.Xml.newPullParser()
+            parser.setInput(java.io.StringReader(transformXml))
+            var inSubtitleTransform = false
+            val values = mutableListOf<String>()
+            while (parser.next() != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+                when (parser.eventType) {
+                    org.xmlpull.v1.XmlPullParser.START_TAG -> when (parser.name) {
+                        "transform" -> inSubtitleTransform =
+                            parser.getAttributeValue(null, "name").equals("Subtitle", ignoreCase = true)
+                        "allowedValue" -> if (inSubtitleTransform) {
+                            parser.nextText().trim().takeIf { it.isNotEmpty() }?.let(values::add)
+                        }
+                    }
+                    org.xmlpull.v1.XmlPullParser.END_TAG -> if (parser.name == "transform") {
+                        inSubtitleTransform = false
+                    }
+                }
+            }
+            values
+        } catch (e: Exception) {
+            Log.w(TAG, "[UPnP] TV 자막 변환 목록 XML 파싱 실패: ${e.message}")
+            emptyList()
+        }
     }
 
     /**
@@ -584,6 +686,17 @@ class DLNARendererManager(
         // MIME 타입 추정
         val mimeType = guessMimeType(mediaUrl)
 
+        val subtitleResourceAttributes = if (subtitleUrl != null) {
+            val escapedSubUrl = subtitleUrl
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+            // pv subtitle metadata belongs to the video <res> element. A standalone
+            // pv:subtitleFileUri child of <item> is ignored by common renderers.
+            " pv:subtitleFileUri=\"$escapedSubUrl\" pv:subtitleFileType=\"SRT\""
+        } else ""
+
         val subtitleElements = if (subtitleUrl != null) {
             val escapedSubUrl = subtitleUrl
                 .replace("&", "&amp;")
@@ -591,27 +704,28 @@ class DLNARendererManager(
                 .replace(">", "&gt;")
             val subMime = "application/x-subrip"
             val subType = "srt"
-            Log.d(TAG, "자막 DIDL 생성: type=$subType, mime=$subMime, url=$escapedSubUrl")
+            Log.d(TAG, "자막 DIDL 생성: external=$escapedSubUrl, pv:subtitleFileType=SRT")
             buildString {
                 // 1. Samsung TV용: sec:CaptionInfoEx & sec:CaptionInfo
                 append("""<sec:CaptionInfoEx sec:type="$subType" protocolInfo="http-get:*:$subMime:*" sec:enabled="true">$escapedSubUrl</sec:CaptionInfoEx>""")
                 append("\n                ")
                 append("""<sec:CaptionInfo sec:type="$subType">$escapedSubUrl</sec:CaptionInfo>""")
-                append("\n                ")
-                // 2. Panasonic/Philips/TCL용: pv:subtitleFileUri & pv:subtitleFileType
-                append("""<pv:subtitleFileUri>$escapedSubUrl</pv:subtitleFileUri>""")
-                append("\n                ")
-                append("""<pv:subtitleFileType>$subType</pv:subtitleFileType>""")
-                append("\n                ")
-                // 3. 표준 DLNA res 엘리먼트 (LG webOS / Sony / Platinum 등)
-                append("""<res protocolInfo="http-get:*:$subMime:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000">$escapedSubUrl</res>""")
-                append("\n                ")
-                append("""<res protocolInfo="http-get:*:text/srt:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000">$escapedSubUrl</res>""")
             }
         } else {
             Log.d(TAG, "자막 URL이 null입니다 - 외부 자막 없이 전송")
             ""
         }
+
+        // Some Android TV renderers ignore the vendor-specific CaptionInfo and resExt
+        // fields, but discover sidecar tracks only when they are advertised as a sibling
+        // DIDL resource. Keep the video <res> first so it remains the primary resource.
+        val subtitleResourceElement = if (subtitleUrl != null) {
+            val escapedSubUrl = subtitleUrl
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            """<res protocolInfo="http-get:*:text/srt:*">$escapedSubUrl</res>"""
+        } else ""
 
         return """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:sec="http://www.sec.co.kr/" xmlns:pv="http://www.pv.com/pvns/" xmlns:smi="urn:schemas-smi-com:smi" xmlns:res_ext="urn:schemas-dlna-org:metadata-1-0/LD/">
             <item id="0" parentID="-1" restricted="1">
@@ -619,10 +733,42 @@ class DLNARendererManager(
                 <dc:language>kor</dc:language>
                 <upnp:class>object.item.videoItem</upnp:class>
                 <pv:subtitleLanguage>kor</pv:subtitleLanguage>
-                <res protocolInfo="http-get:*:$mimeType:DLNA.ORG_OP=01;DLNA.ORG_FLAGS=01700000000000000000000000000000">$escapedUrl</res>
+                <res id="video0" protocolInfo="http-get:*:$mimeType:DLNA.ORG_OP=01;DLNA.ORG_FLAGS=01700000000000000000000000000000"$subtitleResourceAttributes>$escapedUrl</res>
+                $subtitleResourceElement
                 $subtitleElements
+                ${buildSubtitleComponentInfo(subtitleUrl, mimeType)}
             </item>
         </DIDL-Lite>"""
+    }
+
+    private fun buildSubtitleComponentInfo(subtitleUrl: String?, videoMimeType: String): String {
+        if (subtitleUrl == null) return ""
+        val escapedSubUrl = subtitleUrl
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        val subtitleMimeType = "application/x-subrip"
+        return """<upnp:resExt id="video0">
+            |  <upnp:componentInfo>
+            |    <upnp:componentGroup groupID="video" required="1">
+            |      <upnp:component componentID="video0">
+            |        <upnp:componentClass>Video</upnp:componentClass>
+            |        <upnp:contentType MIMEType="$videoMimeType" extendedType="*"/>
+            |      </upnp:component>
+            |    </upnp:componentGroup>
+            |    <upnp:componentGroup groupID="external-captions" required="0">
+            |      <upnp:component componentID="external-caption-ko">
+            |        <upnp:componentClass>Caption</upnp:componentClass>
+            |        <upnp:purpose>Alternative</upnp:purpose>
+            |        <upnp:language>ko</upnp:language>
+            |        <upnp:contentType MIMEType="$subtitleMimeType" extendedType="*"/>
+            |        <upnp:compRes>
+            |          <upnp:res protocolInfo="http-get:*:$subtitleMimeType:*">$escapedSubUrl</upnp:res>
+            |        </upnp:compRes>
+            |      </upnp:component>
+            |    </upnp:componentGroup>
+            |  </upnp:componentInfo>
+            |</upnp:resExt>""".trimMargin()
     }
 
     private fun guessMimeType(url: String): String {

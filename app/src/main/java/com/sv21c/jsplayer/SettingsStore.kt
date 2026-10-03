@@ -8,6 +8,7 @@ object SettingsStore {
     private const val KEY_SORT_ORDER = "sort_order"
     private const val KEY_AUDIO_PASSTHROUGH = "audio_passthrough"
     private const val KEY_LOCAL_VIEW_MODE = "local_view_mode"
+    private const val KEY_CAST_SUBTITLE_BURN_IN = "cast_subtitle_burn_in"
 
     private fun getPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -45,6 +46,15 @@ object SettingsStore {
 
     fun saveLocalViewMode(context: Context, mode: LocalViewMode) {
         getPrefs(context).edit().putString(KEY_LOCAL_VIEW_MODE, mode.name).apply()
+    }
+
+    /** Disabled by default; users can opt in to subtitle burn-in for DLNA renderers. */
+    fun getCastSubtitleBurnInEnabled(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_CAST_SUBTITLE_BURN_IN, false)
+    }
+
+    fun saveCastSubtitleBurnInEnabled(context: Context, enabled: Boolean) {
+        getPrefs(context).edit().putBoolean(KEY_CAST_SUBTITLE_BURN_IN, enabled).apply()
     }
 
     fun getShowProgressBar(context: Context): Boolean {

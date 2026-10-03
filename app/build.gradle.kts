@@ -11,8 +11,8 @@ android {
         applicationId = "com.sv21c.jsplayer"
         minSdk = 29
         targetSdk = 36
-        versionCode = 145
-        versionName = "1.4.5"
+        versionCode = 146
+        versionName = "1.4.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -100,6 +100,9 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-rtsp:$media3_version")
     implementation("androidx.media3:media3-ui:$media3_version")
     implementation("androidx.media3:media3-session:$media3_version")
+    // Burn external subtitles into a temporary casting copy before DLNA playback.
+    implementation("androidx.media3:media3-transformer:$media3_version")
+    implementation("androidx.media3:media3-effect:$media3_version")
     implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1")
     implementation("androidx.media3:media3-datasource-okhttp:$media3_version")
 

@@ -414,7 +414,7 @@ fun NetworkBrowseScreen(
                         val doToggleFavorite: () -> Unit = {
                             val (favSubUrl, favSubExt) = if (isVideo && !isDir) {
                                 val nameWithoutExt = name.substringBeforeLast(".")
-                                val subItem = sortedItems.find { candItem ->
+                                val subCandidates = sortedItems.filter { candItem ->
                                     val (candName, _, candIsDir) = when (candItem) {
                                         is SmbItem -> Triple(candItem.name, candItem.path, candItem.isDirectory)
                                         is WebDavItem -> Triple(candItem.name, candItem.href, candItem.isDirectory)
@@ -431,6 +431,18 @@ fun NetworkBrowseScreen(
                                         (ext == "smi" || ext == "srt" || ext == "ass" || ext == "vtt" || ext == "ssa" || ext == "sub" || ext == "txt") &&
                                         (candBase.equals(nameWithoutExt, ignoreCase = true) || (candBase.startsWith(nameWithoutExt, ignoreCase = true) && candBase.getOrNull(nameWithoutExt.length) == '.'))
                                     }
+                                }
+                                val subItem = preferredSubtitleCandidate(subCandidates) { candItem ->
+                                    val candidateName = when (candItem) {
+                                        is SmbItem -> candItem.name
+                                        is WebDavItem -> candItem.name
+                                        is FtpItem -> candItem.name
+                                        is SftpItem -> candItem.name
+                                        is GoogleDriveItem -> candItem.name
+                                        is OneDriveItem -> candItem.name
+                                        else -> ""
+                                    }
+                                    subtitleExtensionFrom(candidateName)
                                 }
                                 if (subItem != null) {
                                     val (sName, sPath) = when (subItem) {
@@ -767,10 +779,7 @@ private fun handleVideoClick(
         }
         if (matches.isEmpty()) return null
         
-        return matches.find { it.ext == "ass" || it.ext == "ssa" }
-            ?: matches.find { it.ext == "srt" }
-            ?: matches.find { it.ext == "smi" }
-            ?: matches.first()
+        return preferredSubtitleCandidate(matches) { it.ext }
     }
 
     // 선택된 파일의 자막 매칭

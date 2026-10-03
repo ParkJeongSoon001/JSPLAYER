@@ -235,6 +235,28 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Returns the display name supplied by a content provider (usually the real file name). */
+    private fun queryIncomingDisplayName(uri: Uri): String? {
+        if (uri.scheme != "content") return null
+        return try {
+            contentResolver.query(
+                uri,
+                arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (index < 0) return@use null
+                cursor.getString(index)?.trim()?.takeIf { it.isNotEmpty() }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "[EXTERNAL] 파일 표시명 조회 실패: ${e.message}")
+            null
+        }
+    }
+
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         handleIncomingIntent(intent)
@@ -453,11 +475,15 @@ class MainActivity : ComponentActivity() {
                 val externalUri = pendingVideoUri.value
                 LaunchedEffect(externalUri) {
                     if (externalUri != null) {
-                        // URI에서 파일명 추출 시도
-                        val title = externalUri.lastPathSegment
-                            ?.substringAfterLast("/")
-                            ?: "외부 동영상"
-                        android.util.Log.d("MainActivity", "[EXTERNAL] 재생 시작: $title ($externalUri)")
+                        // content:// URI의 마지막 경로는 파일명이 아니라 MediaStore ID일 수 있으므로
+                        // 먼저 provider의 DISPLAY_NAME을 조회한다.
+                        val providerDisplayName = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            queryIncomingDisplayName(externalUri)
+                        }
+                        val uriFileName = externalUri.lastPathSegment?.takeIf { it.isNotBlank() }
+                        val title = providerDisplayName ?: uriFileName ?: "외부 동영상"
+                        val titleSource = if (providerDisplayName != null) "OpenableColumns.DISPLAY_NAME" else "URI fallback"
+                        android.util.Log.d("MainActivity", "[EXTERNAL] 재생 시작: title=$title, source=$titleSource, uri=$externalUri")
                         localBrowsingActiveMode = false
                         browsingDeviceOverride = null
                         networkBrowsingCredentials = null
@@ -507,9 +533,7 @@ class MainActivity : ComponentActivity() {
                                             isSubExt && (itBase.equals(baseName, ignoreCase = true) || itBase.startsWith(baseName, ignoreCase = true) || baseName.startsWith(itBase, ignoreCase = true))
                                         }
                                         if (subs != null && subs.isNotEmpty()) {
-                                            val subFile = subs.find { it.extension.equals("ass", true) || it.extension.equals("ssa", true) }
-                                                ?: subs.find { it.extension.equals("srt", true) }
-                                                ?: subs.find { it.extension.equals("smi", true) }
+                                            val subFile = preferredSubtitleCandidate(subs.asIterable()) { it.extension }
                                                 ?: subs[0]
                                             localSubUrl = "file://" + subFile.absolutePath
                                             localSubExt = subFile.extension.lowercase()
@@ -1173,6 +1197,7 @@ class MainActivity : ComponentActivity() {
                                         
                                         var subResUrl: String? = null
                                         var subResExt: String? = null
+                                        var subResIsExternalSidecar = false
                                         
                                         // --- VERBOSE LOGGING START ---
                                         android.util.Log.d("SubtitleSearch", "========================================")
@@ -1191,15 +1216,47 @@ class MainActivity : ComponentActivity() {
                                         android.util.Log.d("SubtitleSearch", "========================================")
                                         // --- VERBOSE LOGGING END ---
 
-                                        // 1. Look for subtitle embedded in the item's resources
-                                        val embeddedSub = resources.find { 
-                                            val fmt = it.protocolInfo.contentFormat.lowercase()
-                                            fmt.contains("srt") || fmt.contains("smi") || fmt.contains("sub") || it.value.lowercase().endsWith(".srt") || it.value.lowercase().endsWith(".smi")
+                                        // External sidecars must win over subtitle resources embedded in the video item.
+                                        val videoTitleForSubtitle = item.title.orEmpty()
+                                        val videoBaseForSubtitle = videoTitleForSubtitle.substringBeforeLast('.', videoTitleForSubtitle)
+                                        val externalSubtitleItems = browseItems.filterIsInstance<Item>().filter { sibling ->
+                                            if (sibling === item) return@filter false
+                                            val siblingTitle = sibling.title.orEmpty()
+                                            val siblingUrl = sibling.firstResource?.value
+                                            val siblingExt = subtitleExtensionFrom(siblingUrl) ?: subtitleExtensionFrom(siblingTitle)
+                                            val siblingBase = siblingTitle.substringBeforeLast('.', siblingTitle)
+                                            val sameVideo = siblingBase.equals(videoBaseForSubtitle, ignoreCase = true) ||
+                                                siblingBase.startsWith("$videoBaseForSubtitle.", ignoreCase = true) ||
+                                                videoBaseForSubtitle.startsWith("$siblingBase.", ignoreCase = true)
+                                            sameVideo && siblingExt != null && sibling.firstResource?.value != null
                                         }
+                                        val orderedExternalSubtitleItems = externalSubtitleItems.sortedBy { sibling ->
+                                            subtitleFormatPriority(subtitleExtensionFrom(sibling.firstResource?.value) ?: subtitleExtensionFrom(sibling.title))
+                                        }
+                                        val preferredExternalSubtitle = preferredSubtitleCandidate(orderedExternalSubtitleItems) { sibling ->
+                                            subtitleExtensionFrom(sibling.firstResource?.value) ?: subtitleExtensionFrom(sibling.title)
+                                        }
+                                        if (preferredExternalSubtitle != null) {
+                                            subResUrl = preferredExternalSubtitle.firstResource?.value
+                                            subResExt = subtitleExtensionFrom(subResUrl) ?: subtitleExtensionFrom(preferredExternalSubtitle.title)
+                                            subResIsExternalSidecar = subResUrl != null
+                                            android.util.Log.d("SubtitleSearch", "Selected external sidecar by format priority: ext=$subResExt url=$subResUrl")
+                                        }
+
+                                        // Fall back to a subtitle resource advertised on the video item.
+                                        val embeddedSub = if (subResUrl == null) resources.find {
+                                            val fmt = it.protocolInfo.contentFormat.lowercase()
+                                            fmt.contains("srt") || fmt.contains("smi") || fmt.contains("sub") || fmt.contains("ass") ||
+                                                subtitleExtensionFrom(it.value) != null
+                                        } else null
                                         if (embeddedSub != null) {
                                             subResUrl = embeddedSub.value
                                             val fmt = embeddedSub.protocolInfo.contentFormat.lowercase()
-                                            subResExt = if (embeddedSub.value.lowercase().endsWith(".smi") || fmt.contains("smi") || fmt.contains("sami")) "smi" else "srt"
+                                            subResExt = when {
+                                                fmt.contains("ass") || fmt.contains("ssa") -> "ass"
+                                                fmt.contains("smi") || fmt.contains("sami") || subtitleExtensionFrom(embeddedSub.value) == "smi" -> "smi"
+                                                else -> subtitleExtensionFrom(embeddedSub.value) ?: "srt"
+                                            }
                                             android.util.Log.d("SubtitleSearch", "Found embedded subtitle: $subResUrl (ext: $subResExt)")
                                         }
                                         
@@ -1208,46 +1265,11 @@ class MainActivity : ComponentActivity() {
                                             val captionInfo = item.properties.find { it.descriptorName.contains("CaptionInfo") || it.descriptorName.contains("captionInfo") }
                                             if (captionInfo != null && captionInfo.value != null) {
                                                 subResUrl = captionInfo.value.toString()
-                                                val lurl = subResUrl.lowercase()
-                                                subResExt = if (lurl.endsWith(".smi") || lurl.contains("smi")) "smi" else "srt"
+                                                subResExt = subtitleExtensionFrom(subResUrl) ?: "srt"
                                                 android.util.Log.d("SubtitleSearch", "Found sec:CaptionInfo subtitle: $subResUrl (ext: $subResExt)")
                                             }
                                         }
                                         
-                                        // 3. If not found, look for a sibling item with the same base name
-                                        if (subResUrl == null && item.title != null) {
-                                            val videoTitle = item.title!!
-                                            val lastDotIndex = videoTitle.lastIndexOf('.')
-                                            val baseName = if (lastDotIndex > 0) videoTitle.substring(0, lastDotIndex) else videoTitle
-                                            
-                                            val siblingSubItem = browseItems.filterIsInstance<Item>().find { sibling ->
-                                                val siblingName = sibling.title ?: ""
-                                                val sLastDotIndex = siblingName.lastIndexOf('.')
-                                                val siblingBase = if (sLastDotIndex > 0) siblingName.substring(0, sLastDotIndex) else siblingName
-                                                
-                                                val valUrl = sibling.firstResource?.value?.lowercase() ?: ""
-                                                val ext = when {
-                                                    valUrl.substringAfterLast("?").substringBeforeLast("#").endsWith(".smi") -> "smi"
-                                                    valUrl.substringAfterLast("?").substringBeforeLast("#").endsWith(".srt") -> "srt"
-                                                    valUrl.substringAfterLast("?").substringBeforeLast("#").endsWith(".vtt") -> "vtt"
-                                                    valUrl.substringAfterLast("?").substringBeforeLast("#").endsWith(".sub") -> "sub"
-                                                    valUrl.substringAfterLast("?").substringBeforeLast("#").endsWith(".ass") -> "ass"
-                                                    sLastDotIndex > 0 -> siblingName.substring(sLastDotIndex + 1).lowercase()
-                                                    else -> ""
-                                                }
-                                                val isSubtitleExt = ext == "smi" || ext == "srt" || ext == "vtt" || ext == "sub" || ext == "ass"
-                                                val isMatch = siblingBase == baseName || siblingBase.startsWith(baseName) || baseName.startsWith(siblingBase)
-                                                if (isMatch && isSubtitleExt) {
-                                                    subResExt = ext
-                                                    true
-                                                } else false
-                                            }
-                                            if (siblingSubItem != null) {
-                                                subResUrl = siblingSubItem.firstResource?.value
-                                                android.util.Log.d("SubtitleSearch", "Found sibling Subtitle URL: $subResUrl with Ext: $subResExt")
-                                            }
-                                        }
-
                                         val url = videoRes?.value
                                         if (url != null) {
                                             // Always use the async downloader to handle SMI encoding issues (EUC-KR to UTF-8) and caching.
@@ -1261,8 +1283,8 @@ class MainActivity : ComponentActivity() {
                                                         android.util.Log.d("SubtitleSearch", "Fetching subtitle: $targetUrl")
                                                         val conn = java.net.URL(targetUrl).openConnection() as java.net.HttpURLConnection
                                                         conn.requestMethod = "GET"
-                                                        conn.connectTimeout = 3000
-                                                        conn.readTimeout = 5000
+                                                        conn.connectTimeout = 1500
+                                                        conn.readTimeout = 2500
                                                         if (conn.responseCode !in 200..299) {
                                                             android.util.Log.d("SubtitleSearch", "Fetch failed: HTTP ${conn.responseCode}")
                                                             return false
@@ -1359,22 +1381,44 @@ class MainActivity : ComponentActivity() {
                                                 }
 
                                                 var found = false
-                                                // 1. Try downloading previously discovered subtitle URL (embedded, CaptionInfo, or sibling)
-                                                if (subResUrl != null) {
-                                                    android.util.Log.d("SubtitleSearch", "Trying provided sub URL: $subResUrl")
+                                                // 1. Download a separately listed sidecar first. Its format was chosen ASS > SMI > SRT.
+                                                if (subResIsExternalSidecar && subResUrl != null) {
+                                                    android.util.Log.d("SubtitleSearch", "Trying preferred external sidecar: ext=$subResExt url=$subResUrl")
                                                     found = tryDownloadSub(subResUrl!!, subResExt ?: "srt")
                                                 }
-                                                
-                                                // 2. If not found or failed, probe the hidden URLs with the same base name
-                                                if (!found) {
-                                                    android.util.Log.d("SubtitleSearch", "Probing hidden subtitle URLs for base name...")
-                                                    val lastDotIndex = url.lastIndexOf('.')
-                                                    if (lastDotIndex > 0) {
-                                                        val baseUrl = url.substring(0, lastDotIndex)
-                                                        if (tryDownloadSub("$baseUrl.ass", "ass")) found = true
-                                                        else if (tryDownloadSub("$baseUrl.srt", "srt")) found = true
-                                                        else if (tryDownloadSub("$baseUrl.smi", "smi")) found = true
+
+                                                if (!found && subResIsExternalSidecar) {
+                                                    for (sibling in orderedExternalSubtitleItems.drop(1)) {
+                                                        val candidateUrl = sibling.firstResource?.value ?: continue
+                                                        val candidateExt = subtitleExtensionFrom(candidateUrl) ?: subtitleExtensionFrom(sibling.title) ?: continue
+                                                        android.util.Log.d("SubtitleSearch", "Preferred external sidecar failed; trying next format: ext=$candidateExt url=$candidateUrl")
+                                                        if (tryDownloadSub(candidateUrl, candidateExt)) {
+                                                            subResUrl = candidateUrl
+                                                            subResExt = candidateExt
+                                                            found = true
+                                                            break
+                                                        }
                                                     }
+                                                }
+                                                
+                                                // 2. Servers sometimes hide sidecars from Browse results. Probe them before
+                                                //    accepting an embedded/caption resource advertised on the video item.
+                                                if (!found && orderedExternalSubtitleItems.isEmpty()) {
+                                                    android.util.Log.d("SubtitleSearch", "Probing hidden external sidecars in ASS > SMI > SRT order")
+                                                    for (ext in listOf("ass", "smi", "srt")) {
+                                                        val candidateUrl = sidecarSubtitleUrl(url, ext) ?: continue
+                                                        if (tryDownloadSub(candidateUrl, ext)) {
+                                                            found = true
+                                                            subResIsExternalSidecar = true
+                                                            break
+                                                        }
+                                                    }
+                                                }
+
+                                                // 3. Use the video item's advertised track only when no external sidecar was found.
+                                                if (!found && !subResIsExternalSidecar && subResUrl != null) {
+                                                    android.util.Log.d("SubtitleSearch", "No external sidecar found; trying advertised subtitle resource: $subResUrl")
+                                                    found = tryDownloadSub(subResUrl!!, subResExt ?: "srt")
                                                 }
                                                 
                                                 kotlinx.coroutines.withContext(Dispatchers.Main) {
@@ -1384,7 +1428,7 @@ class MainActivity : ComponentActivity() {
                                                     val finalExtToPass = if (found) verifiedExt else subResExt
                                                     
                                                     // 플레이리스트 구성 (같은 폴더의 동영상 아이템 - 자막 파일 제외)
-                                                    val subtitleExts = setOf("srt", "smi", "ass", "vtt", "sub", "ssa", "idx")
+                                                    val subtitleExts = setOf("srt", "smi", "ass", "ssa", "vtt", "sub", "idx", "txt")
                                                     val videoItems = browseItems.filterIsInstance<Item>().filter { bi ->
                                                         val titleLower = bi.title?.lowercase() ?: ""
                                                         val titleExt = titleLower.substringAfterLast(".", "")
@@ -1400,55 +1444,49 @@ class MainActivity : ComponentActivity() {
                                                         // FIND SUBTITLE FOR THIS `vi`
                                                         var viSubResUrl: String? = null
                                                         var viSubResExt: String? = null
-                                                        
-                                                        val viEmbeddedSub = vi.resources.find { 
-                                                            val fmt = it.protocolInfo.contentFormat.lowercase()
-                                                            fmt.contains("srt") || fmt.contains("smi") || fmt.contains("sub") || it.value.lowercase().endsWith(".srt") || it.value.lowercase().endsWith(".smi")
+
+                                                        val videoTitle = vi.title.orEmpty()
+                                                        val baseName = videoTitle.substringBeforeLast('.', videoTitle)
+                                                        val externalCandidates = browseItems.filterIsInstance<Item>().filter { sibling ->
+                                                            if (sibling === vi) return@filter false
+                                                            val siblingTitle = sibling.title.orEmpty()
+                                                            val ext = subtitleExtensionFrom(sibling.firstResource?.value) ?: subtitleExtensionFrom(siblingTitle)
+                                                            val siblingBase = siblingTitle.substringBeforeLast('.', siblingTitle)
+                                                            val sameVideo = siblingBase.equals(baseName, ignoreCase = true) ||
+                                                                siblingBase.startsWith("$baseName.", ignoreCase = true) ||
+                                                                baseName.startsWith("$siblingBase.", ignoreCase = true)
+                                                            sameVideo && ext != null && sibling.firstResource?.value != null
                                                         }
-                                                        if (viEmbeddedSub != null) {
-                                                            viSubResUrl = viEmbeddedSub.value
-                                                            val fmt = viEmbeddedSub.protocolInfo.contentFormat.lowercase()
-                                                            viSubResExt = if (viEmbeddedSub.value.lowercase().endsWith(".smi") || fmt.contains("smi") || fmt.contains("sami")) "smi" else "srt"
+                                                        val externalCandidate = preferredSubtitleCandidate(externalCandidates) { sibling ->
+                                                            subtitleExtensionFrom(sibling.firstResource?.value) ?: subtitleExtensionFrom(sibling.title)
                                                         }
-                                                        
+                                                        if (externalCandidate != null) {
+                                                            viSubResUrl = externalCandidate.firstResource?.value
+                                                            viSubResExt = subtitleExtensionFrom(viSubResUrl) ?: subtitleExtensionFrom(externalCandidate.title)
+                                                        }
+
+                                                        if (viSubResUrl == null) {
+                                                            val viEmbeddedSub = vi.resources.find {
+                                                                val fmt = it.protocolInfo.contentFormat.lowercase()
+                                                                fmt.contains("srt") || fmt.contains("smi") || fmt.contains("sub") || fmt.contains("ass") ||
+                                                                    subtitleExtensionFrom(it.value) != null
+                                                            }
+                                                            if (viEmbeddedSub != null) {
+                                                                viSubResUrl = viEmbeddedSub.value
+                                                                val fmt = viEmbeddedSub.protocolInfo.contentFormat.lowercase()
+                                                                viSubResExt = when {
+                                                                    fmt.contains("ass") || fmt.contains("ssa") -> "ass"
+                                                                    fmt.contains("smi") || fmt.contains("sami") || subtitleExtensionFrom(viEmbeddedSub.value) == "smi" -> "smi"
+                                                                    else -> subtitleExtensionFrom(viEmbeddedSub.value) ?: "srt"
+                                                                }
+                                                            }
+                                                        }
+
                                                         if (viSubResUrl == null) {
                                                             val captionInfo = vi.properties.find { it.descriptorName.contains("CaptionInfo") || it.descriptorName.contains("captionInfo") }
                                                             if (captionInfo != null && captionInfo.value != null) {
                                                                 viSubResUrl = captionInfo.value.toString()
-                                                                val lurl = viSubResUrl.lowercase()
-                                                                viSubResExt = if (lurl.endsWith(".smi") || lurl.contains("smi")) "smi" else "srt"
-                                                            }
-                                                        }
-                                                        
-                                                        if (viSubResUrl == null && vi.title != null) {
-                                                            val videoTitle = vi.title!!
-                                                            val lastDotIndex = videoTitle.lastIndexOf('.')
-                                                            val baseName = if (lastDotIndex > 0) videoTitle.substring(0, lastDotIndex) else videoTitle
-                                                            
-                                                            val siblingSubItem = browseItems.filterIsInstance<Item>().find { sibling ->
-                                                                if (sibling == vi) return@find false
-                                                                val siblingName = sibling.title ?: ""
-                                                                val sLastDotIndex = siblingName.lastIndexOf('.')
-                                                                val siblingBase = if (sLastDotIndex > 0) siblingName.substring(0, sLastDotIndex) else siblingName
-                                                                
-                                                                val valUrl = sibling.firstResource?.value?.lowercase() ?: ""
-                                                                val ext = when {
-                                                                    valUrl.substringAfterLast("?").substringBeforeLast("#").endsWith(".smi") -> "smi"
-                                                                    valUrl.substringAfterLast("?").substringBeforeLast("#").endsWith(".srt") -> "srt"
-                                                                    valUrl.substringAfterLast("?").substringBeforeLast("#").endsWith(".vtt") -> "vtt"
-                                                                    valUrl.substringAfterLast("?").substringBeforeLast("#").endsWith(".sub") -> "sub"
-                                                                    valUrl.substringAfterLast("?").substringBeforeLast("#").endsWith(".ass") -> "ass"
-                                                                    sLastDotIndex > 0 -> siblingName.substring(sLastDotIndex + 1).lowercase()
-                                                                    else -> ""
-                                                                }
-                                                                val isSubtitleExt = ext == "smi" || ext == "srt" || ext == "vtt" || ext == "sub" || ext == "ass"
-                                                                val isMatch = siblingBase == baseName || siblingBase.startsWith(baseName) || baseName.startsWith(siblingBase)
-                                                                isSubtitleExt && isMatch
-                                                            }
-                                                            if (siblingSubItem != null) {
-                                                                viSubResUrl = siblingSubItem.firstResource?.value
-                                                                val siblingName = siblingSubItem.title ?: ""
-                                                                viSubResExt = siblingName.substringAfterLast(".", "").lowercase().takeIf { it.isNotEmpty() } ?: "srt"
+                                                                viSubResExt = subtitleExtensionFrom(viSubResUrl) ?: "srt"
                                                             }
                                                         }
 
@@ -1535,9 +1573,7 @@ class MainActivity : ComponentActivity() {
                                                         isSubExt && (itBase.equals(baseName, ignoreCase = true) || itBase.startsWith(baseName, ignoreCase = true) || baseName.startsWith(itBase, ignoreCase = true))
                                                     }
                                                     if (subs != null && subs.isNotEmpty()) {
-                                                        val subFile = subs.find { it.extension.equals("ass", true) || it.extension.equals("ssa", true) }
-                                                            ?: subs.find { it.extension.equals("srt", true) }
-                                                            ?: subs.find { it.extension.equals("smi", true) }
+                                                        val subFile = preferredSubtitleCandidate(subs.asIterable()) { it.extension }
                                                             ?: subs[0]
                                                         localSubUrl = "file://" + subFile.absolutePath
                                                         localSubExt = subFile.extension.lowercase()
@@ -1734,13 +1770,23 @@ class MainActivity : ComponentActivity() {
                                     rendererDevices = rendererDevices.toList(),
                                     isCasting = isCasting.value,
                                     currentRenderer = currentRenderer.value,
-                                    onCastToDevice = { device, actualSubtitleUrl, positionMs ->
-                                        val httpServer = localHttpServer ?: return@VideoPlayerScreen
+                                    onCastToDevice = { device, actualSubtitleUrl, positionMs, burnExternalSubtitle, subtitleOffsetForCastMs, onPreparationProgress, onPreparationComplete ->
+                                        val httpServer = localHttpServer
+                                        if (httpServer == null) {
+                                            onPreparationComplete()
+                                            return@VideoPlayerScreen
+                                        }
                                         val credentials = networkBrowsingCredentials
                                         val videoUrl = state.videoUrl
                                         val videoTitle = state.title
                                         val effectiveSubUrl = actualSubtitleUrl ?: state.subtitleUrl
                                         // 네트워크 파일 크기 조회가 I/O를 수행하므로 백그라운드에서 실행
+                                        val preparationCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
+                                        val finishPreparation = {
+                                            if (preparationCompleted.compareAndSet(false, true)) {
+                                                runOnUiThread { onPreparationComplete() }
+                                            }
+                                        }
                                         Thread {
                                             android.util.Log.d("Casting", "━━━ 캐스팅 시작 (백그라운드) ━━━")
                                             android.util.Log.d("Casting", "videoUrl: $videoUrl")
@@ -1783,19 +1829,83 @@ class MainActivity : ComponentActivity() {
                                                 val (streamUrl, streamSubUrl) = httpServer.getStreamableUrl(
                                                     videoUrl,
                                                     readySubUrl,
-                                                    credentials
+                                                    credentials,
+                                                    forceHttpVideoProxy = burnExternalSubtitle
                                                 )
                                                 if (streamUrl.isBlank()) {
                                                     android.util.Log.e("Casting", "스트리밍 URL을 생성할 수 없습니다")
+                                                    finishPreparation()
                                                     return@Thread
                                                 }
                                                 android.util.Log.d("Casting", "영상 스트림 URL: $streamUrl")
                                                 android.util.Log.d("Casting", "자막 스트림 URL: $streamSubUrl")
+
+                                                val subtitleUrlForBurnIn = readySubUrl
+                                                var castVideoUrl = streamUrl
+                                                var castSubtitleUrl = streamSubUrl
+                                                if (burnExternalSubtitle && subtitleUrlForBurnIn != null) {
+                                                    runOnUiThread {
+                                                        Toast.makeText(
+                                                            this@MainActivity,
+                                                            "외장 자막 영상 변환 중입니다. 수분에서 수십 분 걸릴 수 있습니다.",
+                                                            Toast.LENGTH_LONG
+                                                        ).show()
+                                                    }
+                                                    try {
+                                                        val subtitleUri = Uri.parse(subtitleUrlForBurnIn)
+                                                        val subtitlePath = if (subtitleUri.scheme == "file") {
+                                                            subtitleUri.path
+                                                        } else if (subtitleUrlForBurnIn.startsWith("/")) {
+                                                            subtitleUrlForBurnIn
+                                                        } else null
+                                                        val subtitleFile = subtitlePath?.let { java.io.File(it) }
+                                                            ?: throw java.io.IOException("로컬 자막 캐시를 찾을 수 없습니다")
+                                                        val burnedFile = java.io.File(
+                                                            cacheDir,
+                                                            "cast_burned_${System.currentTimeMillis()}.mp4"
+                                                        )
+                                                        SubtitleBurnInTranscoder.transcode(
+                                                            context = this@MainActivity,
+                                                            inputHttpUrl = streamUrl,
+                                                            subtitleFile = subtitleFile,
+                                                            subtitleOffsetMs = subtitleOffsetForCastMs,
+                                                            outputFile = burnedFile,
+                                                            onProgress = { progress ->
+                                                                runOnUiThread { onPreparationProgress(progress) }
+                                                            }
+                                                        )
+                                                        val burnedHttpUrl = httpServer.registerLocalFile(
+                                                            burnedFile.absolutePath,
+                                                            "video/mp4"
+                                                        )
+                                                        if (burnedHttpUrl.isBlank()) {
+                                                            burnedFile.delete()
+                                                            throw java.io.IOException("변환된 영상을 캐스팅 서버에 등록하지 못했습니다")
+                                                        }
+                                                        castVideoUrl = burnedHttpUrl
+                                                        castSubtitleUrl = null
+                                                        android.util.Log.i("Casting", "외장 자막 포함 영상 등록 완료: $burnedHttpUrl")
+                                                    } catch (e: Exception) {
+                                                        android.util.Log.e(
+                                                            "Casting",
+                                                            "자막 입히기 실패, 기존 영상/자막 방식으로 자동 복귀합니다",
+                                                            e
+                                                        )
+                                                        runOnUiThread {
+                                                            Toast.makeText(
+                                                                this@MainActivity,
+                                                                "자막 영상 변환에 실패해 기존 전송 방식으로 진행합니다.",
+                                                                Toast.LENGTH_LONG
+                                                            ).show()
+                                                        }
+                                                    }
+                                                }
+                                                finishPreparation()
                                                 rendererManager.castToDevice(
                                                     device = device,
-                                                    mediaUrl = streamUrl,
+                                                    mediaUrl = castVideoUrl,
                                                     title = videoTitle,
-                                                    subtitleUrl = streamSubUrl,
+                                                    subtitleUrl = castSubtitleUrl,
                                                     startPositionMs = positionMs,
                                                     onSuccess = {
                                                         runOnUiThread {
@@ -1810,6 +1920,7 @@ class MainActivity : ComponentActivity() {
                                                     }
                                                 )
                                             } catch (e: Exception) {
+                                                finishPreparation()
                                                 android.util.Log.e("Casting", "캐스팅 처리 오류: ${e.message}", e)
                                             }
                                         }.start()
@@ -2706,7 +2817,7 @@ fun VideoPlayerScreen(
     rendererDevices: List<Device<*, *, *>> = emptyList(),
     isCasting: Boolean = false,
     currentRenderer: Device<*, *, *>? = null,
-    onCastToDevice: (Device<*, *, *>, String?, Long) -> Unit = { _, _, _ -> },
+    onCastToDevice: (Device<*, *, *>, String?, Long, Boolean, Long, (Int?) -> Unit, () -> Unit) -> Unit = { _, _, _, _, _, _, done -> done() },
     onStopCasting: () -> Unit = {},
     onCastPause: () -> Unit = {},
     onCastResume: () -> Unit = {},
@@ -2723,6 +2834,13 @@ fun VideoPlayerScreen(
 
     // ── 캐스팅 UI 상태 ──
     var showRendererDialog by remember { mutableStateOf(false) }
+    var castSubtitleBurnIn by remember {
+        mutableStateOf(SettingsStore.getCastSubtitleBurnInEnabled(context))
+    }
+    var castPreparationInProgress by remember { mutableStateOf(false) }
+    var castPreparationProgress by remember { mutableStateOf<Int?>(null) }
+    var castPreparationStartedAt by remember { mutableLongStateOf(0L) }
+    var castPreparationElapsedSeconds by remember { mutableLongStateOf(0L) }
     var castPosition by remember { mutableLongStateOf(0L) }
     var castDuration by remember { mutableLongStateOf(1L) }
     var castIsPlaying by remember { mutableStateOf(true) }
@@ -2730,6 +2848,15 @@ fun VideoPlayerScreen(
     
     // 재생이 실제로 시작되었는지 추적 (한번 플레이된 후 멈췄을 때만 자동 종료)
     var hasStartedPlaying by remember { mutableStateOf(false) }
+
+    LaunchedEffect(castPreparationInProgress, castPreparationStartedAt) {
+        if (!castPreparationInProgress) return@LaunchedEffect
+        while (castPreparationInProgress) {
+            castPreparationElapsedSeconds =
+                ((android.os.SystemClock.elapsedRealtime() - castPreparationStartedAt) / 1000L).coerceAtLeast(0L)
+            delay(1000L)
+        }
+    }
 
     // 캐스팅 중 위치 동기화 (1초마다 폴링)
     LaunchedEffect(isCasting, currentRenderer) {
@@ -2839,6 +2966,8 @@ fun VideoPlayerScreen(
     var isPlaying by remember { mutableStateOf(true) }
     var currentSpeed by remember { mutableFloatStateOf(SettingsStore.getPlaybackSpeed(context)) }
     var subtitleOffsetMs by remember { mutableLongStateOf(0L) }
+    var useVlcNativeSubtitle by remember { mutableStateOf(false) }
+    var pendingVlcStartPositionMs by remember { mutableStateOf<Long?>(null) }
     var hideTimerKey by remember { mutableIntStateOf(0) }
     var isOrientationLocked by remember { mutableStateOf(true) }
     var videoSizeState by remember { mutableStateOf<androidx.media3.common.VideoSize?>(null) }
@@ -2949,6 +3078,8 @@ fun VideoPlayerScreen(
     LaunchedEffect(subtitleUrl, videoUrl) {
         isSubReady = false
         subtitleOffsetMs = 0L
+        useVlcNativeSubtitle = false
+        pendingVlcStartPositionMs = null
         try {
             kotlinx.coroutines.withTimeoutOrNull(10000L) {
                 if (subtitleUrl != null) {
@@ -3002,9 +3133,7 @@ fun VideoPlayerScreen(
                                                 isSubExt && (itBase.equals(baseName, ignoreCase = true) || (itBase.startsWith(baseName, ignoreCase = true) && itBase.getOrNull(baseName.length) == '.'))
                                             }
                                             if (subs != null && subs.isNotEmpty()) {
-                                                val subFile = subs.find { it.extension.equals("ass", true) }
-                                                    ?: subs.find { it.extension.equals("srt", true) }
-                                                    ?: subs.find { it.extension.equals("smi", true) }
+                                                val subFile = preferredSubtitleCandidate(subs.asIterable()) { it.extension }
                                                     ?: subs[0]
                                                 val (url, ext) = downloadAndProcessSubtitle(context, "file://" + subFile.absolutePath, ftpEncoding, httpHeaders, subFile.extension)
                                                 if (url != null) {
@@ -3045,7 +3174,7 @@ fun VideoPlayerScreen(
                                 val port = parsedUri.port
                                 val isFtps = scheme == "ftps"
                                 
-                                val subExtensions = listOf("ass", "ssa", "srt", "smi", "vtt", "sub", "txt")
+                                val subExtensions = listOf("ass", "ssa", "smi", "srt", "vtt", "sub", "txt")
                                 var matchedFileName: String? = null
                                 var matchedFileUrl: String? = null
                                 var matchedExt: String? = null
@@ -3146,7 +3275,7 @@ fun VideoPlayerScreen(
                     if (lastDotIndex > lastSlashIndex && lastDotIndex > 0 && videoUrl.length - lastDotIndex <= 5) {
                         val baseUrl = videoUrl.substring(0, lastDotIndex)
                         var probeFound = false
-                        for (probeExt in listOf("ass", "ssa", "srt", "smi", "vtt", "sub", "txt")) {
+                        for (probeExt in listOf("ass", "ssa", "smi", "srt", "vtt", "sub", "txt")) {
                             val probeUrl = "$baseUrl.$probeExt"
                             android.util.Log.d("AutoPlay", "VideoPlayerScreen: Probing subtitle: $probeUrl")
                             try {
@@ -3575,7 +3704,9 @@ fun VideoPlayerScreen(
         if (useVlcFallback) {
             exoPlayer.pause()
             val savedPos = PlaybackPositionStore.getPosition(context, videoUrl)
-            val vlcStartPosition = if (savedPositionForRetry > 0L) savedPositionForRetry else savedPos
+            val vlcStartPosition = pendingVlcStartPositionMs
+                ?: if (savedPositionForRetry > 0L) savedPositionForRetry else savedPos
+            pendingVlcStartPositionMs = null
             vlcPlayer.setSpeed(currentSpeed)
             val vlcSafeUrl = getSafeEncodedUrl(videoUrl)
             android.util.Log.i("ExoPlayer_Debug", "🎵 VLC에 인코딩된 URL 전달: $vlcSafeUrl")
@@ -3755,28 +3886,118 @@ fun VideoPlayerScreen(
     LaunchedEffect(isCasting) {
         if (isCasting) {
             exoPlayer.playWhenReady = false
-            android.util.Log.d("Casting", "캐스팅 시작 → ExoPlayer 일시정지")
+            if (useVlcFallback) vlcPlayer.pause()
+            android.util.Log.d("Casting", "캐스팅 시작 → 활성 로컬 플레이어 일시정지")
         } else {
-            exoPlayer.playWhenReady = true
-            android.util.Log.d("Casting", "캐스팅 종료 → ExoPlayer 재생 재개")
+            if (useVlcFallback) {
+                vlcPlayer.resume()
+            } else {
+                exoPlayer.playWhenReady = true
+            }
+            android.util.Log.d("Casting", "캐스팅 종료 → 활성 로컬 플레이어 재개")
         }
     }
 
     // --- 자막 오프셋 적용 (SRT/ASS/VTT 포맷 지원, 최초 0L 스킵으로 초기 자막 유실 방지) ---
     var lastAppliedSubtitleOffsetMs by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(subtitleOffsetMs) {
+    val subtitleSyncTargetUrl = finalSubtitleUrl ?: originalSubtitleUrl
+    val hasSelectedEmbeddedSubtitle = subtitleTrackLabels.any { (_, selected, group) ->
+        selected && (0 until group.length).any { trackIndex ->
+            val format = group.getFormat(trackIndex)
+            val id = format.id.orEmpty()
+            val label = format.label.orEmpty()
+            id != "jsplayer_external_sub" &&
+                !id.startsWith("jsplayer_external_sub") &&
+                !label.contains("jsplayer_external")
+        }
+    }
+    // Track lists briefly become empty while ExoPlayer replaces an external subtitle.
+    // Only let embedded-track readiness restart this effect when no external subtitle exists.
+    val useNativeEmbeddedSubtitleForSync =
+        shouldUseNativeEmbeddedSubtitleForSync(subtitleSyncTargetUrl, hasSelectedEmbeddedSubtitle)
+    LaunchedEffect(
+        subtitleOffsetMs,
+        subtitleSyncTargetUrl,
+        finalSubtitleExt,
+        isSubReady,
+        useVlcFallback,
+        useNativeEmbeddedSubtitleForSync,
+        isSubtitleDisabled,
+        useVlcNativeSubtitle
+    ) {
         val requestedOffsetMs = subtitleOffsetMs
         // 최초 시작 시 0L 오프셋이면 ExoPlayer MediaItem을 재로드하지 않고 건너뜀 (초기 자막 유지)
         if (requestedOffsetMs == 0L && lastAppliedSubtitleOffsetMs == 0L) {
             return@LaunchedEffect
         }
-        val targetSubUrl = finalSubtitleUrl ?: originalSubtitleUrl
-        if (targetSubUrl == null) return@LaunchedEffect
-        // VLC 모드에서는 VlcSubtitleOverlay에서 실시간 오프셋 처리하므로 ExoPlayer 자막 재로드 불필요
-        if (useVlcFallback) return@LaunchedEffect
+        // 오프셋을 자막 다운로드/탐색보다 먼저 눌렀더라도 자막 준비 후 다시 적용
+        if (!isSubReady) return@LaunchedEffect
+        val targetSubUrl = subtitleSyncTargetUrl
+
+        if (targetSubUrl == null) {
+            // 외부 자막 파일이 없는 MKV 등의 내부 자막은 ExoPlayer에 오프셋 API가 없다.
+            // 선택된 내부 트랙이면 위치를 보존해 VLC로 넘긴 뒤 LibVLC 자막 지연을 쓴다.
+            if (!isSubtitleDisabled && (useNativeEmbeddedSubtitleForSync || useVlcFallback)) {
+                useVlcNativeSubtitle = true
+                if (!useVlcFallback) {
+                    pendingVlcStartPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
+                    useVlcFallback = true
+                    lastAppliedSubtitleOffsetMs = requestedOffsetMs
+                    android.util.Log.i(
+                        "VideoPlayerScreen",
+                        "내부 자막 싱크를 위해 VLC로 전환: ${requestedOffsetMs}ms"
+                    )
+                } else {
+                    vlcPlayer.setSubtitleDelay(requestedOffsetMs)
+                    lastAppliedSubtitleOffsetMs = requestedOffsetMs
+                    android.util.Log.i(
+                        "VideoPlayerScreen",
+                        "내부 자막 오프셋 적용 완료: ${requestedOffsetMs}ms (VLC)"
+                    )
+                }
+            } else {
+                android.util.Log.w(
+                    "VideoPlayerScreen",
+                    "외부 자막 파일 또는 선택된 내부 자막 트랙이 없어 오프셋을 적용할 수 없습니다."
+                )
+            }
+            return@LaunchedEffect
+        }
+        // VLC 외부 자막은 VlcSubtitleOverlay가 처리하고, 내부 자막은 LibVLC가 처리한다.
+        if (useVlcFallback) {
+            val vlcRendersNativeSubtitle = useVlcNativeSubtitle || isAssFallback
+            if (vlcRendersNativeSubtitle && !isSubtitleDisabled) {
+                vlcPlayer.setSubtitleDelay(requestedOffsetMs)
+                lastAppliedSubtitleOffsetMs = requestedOffsetMs
+                android.util.Log.i(
+                    "VideoPlayerScreen",
+                    "내부 자막 오프셋 적용 완료: ${requestedOffsetMs}ms (VLC)"
+                )
+            }
+            return@LaunchedEffect
+        }
 
         // 빠르게 연속 클릭 시 마지막 값만 적용 (200ms 대기)
         kotlinx.coroutines.delay(200L)
+
+        // 자막 준비와 미디어 항목 준비는 비동기이므로, 항목이 생길 때까지 기다린 뒤
+        // 현재 위치를 보존해 다시 로드한다. null인 순간 한 번 시도하고 끝내지 않는다.
+        val hasCurrentMediaItem = kotlinx.coroutines.withTimeoutOrNull(15000L) {
+            while (exoPlayer.currentMediaItem == null) {
+                kotlinx.coroutines.delay(100L)
+            }
+            true
+        } ?: false
+        if (!hasCurrentMediaItem) {
+            android.util.Log.w("VideoPlayerScreen", "미디어 항목 준비 시간 초과, 자막 오프셋 적용을 건너뜁니다.")
+            return@LaunchedEffect
+        }
+        val activeOffsetPaths = exoPlayer.currentMediaItem
+            ?.localConfiguration
+            ?.subtitleConfigurations
+            ?.mapNotNull { it.uri.takeIf { uri -> uri.scheme == "file" }?.path }
+            ?.toSet()
+            .orEmpty()
 
         var sourceUrl = targetSubUrl
         var subtitlePath = sourceUrl.removePrefix("file://")
@@ -3823,9 +4044,14 @@ fun VideoPlayerScreen(
 
                 val targetExt = if (ext in listOf("ass", "ssa")) "ass" else if (ext == "vtt") "vtt" else "srt"
 
-                // 이전 임시 자막 오프셋 캐시 파일 정리
+                // 오래된 오프셋 파일만 정리한다. 현재 MediaItem이 참조하는 파일은
+                // 재로딩 완료 전까지 플레이어가 다시 열 수 있으므로 절대 삭제하지 않는다.
+                val staleBefore = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
                 context.cacheDir.listFiles()?.forEach { file ->
-                    if (file.name.startsWith("cached_sub_offset_")) {
+                    if (file.name.startsWith("cached_sub_offset_") &&
+                        file.lastModified() < staleBefore &&
+                        file.absolutePath !in activeOffsetPaths
+                    ) {
                         try { file.delete() } catch (_: Exception) {}
                     }
                 }
@@ -3864,21 +4090,39 @@ fun VideoPlayerScreen(
                     return@withContext
                 }
                 val currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
-                val wasPlaying = exoPlayer.isPlaying
+                val shouldPlayWhenReady = exoPlayer.playWhenReady
                 val newMediaItem = currentMediaItem.buildUpon()
                     .setSubtitleConfigurations(listOf(newSubConfig))
                     .build()
 
+                // 교체되는 자막 TrackGroup을 가리키는 낡은 override는 새 그룹에 적용되지 않는다.
+                // 단, 사용자가 고른 내장 자막 트랙은 그대로 유지한다.
+                val manuallySelectedEmbeddedSubtitle = userManuallySelectedSubtitle &&
+                    !isSubtitleDisabled &&
+                    subtitleTrackLabels.any { (_, selected, group) ->
+                        selected && (0 until group.length).any { trackIndex ->
+                            val format = group.getFormat(trackIndex)
+                            val id = format.id.orEmpty()
+                            val label = format.label.orEmpty()
+                            id != "jsplayer_external_sub" &&
+                                !id.startsWith("jsplayer_external_sub") &&
+                                !label.contains("jsplayer_external")
+                        }
+                    }
+                val selectorParameters = trackSelector.buildUponParameters()
+                    .setTrackTypeDisabled(
+                        androidx.media3.common.C.TRACK_TYPE_TEXT,
+                        isSubtitleDisabled
+                    )
+                    .setPreferredTextLanguage("ko")
+                if (!manuallySelectedEmbeddedSubtitle) {
+                    selectorParameters.clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_TEXT)
+                }
+                trackSelector.setParameters(selectorParameters)
+
                 exoPlayer.setMediaItem(newMediaItem, currentPositionMs)
                 exoPlayer.prepare()
-                exoPlayer.playWhenReady = wasPlaying
-
-                // 자막 트랙 활성화 보장
-                trackSelector.setParameters(
-                    trackSelector.buildUponParameters()
-                        .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, false)
-                        .setPreferredTextLanguage("ko")
-                )
+                exoPlayer.playWhenReady = shouldPlayWhenReady
                 lastAppliedSubtitleOffsetMs = requestedOffsetMs
                 android.util.Log.d("VideoPlayerScreen", "자막 오프셋 적용 완료: ${requestedOffsetMs}ms (포맷=$ext)")
             } catch (e: Exception) {
@@ -4180,8 +4424,8 @@ fun VideoPlayerScreen(
             11 -> { mainActivity?.enterPipMode(); return }
             12 -> { onClose(); return }
             13 -> { showRendererDialog = true } // 캐스트 버튼
-            14 -> subtitleOffsetMs = (subtitleOffsetMs - 500L).coerceIn(-30000L, 30000L)
-            15 -> subtitleOffsetMs = (subtitleOffsetMs + 500L).coerceIn(-30000L, 30000L)
+            14 -> subtitleOffsetMs = subtitleOffsetAfterSyncButton(subtitleOffsetMs, isPlusButton = false)
+            15 -> subtitleOffsetMs = subtitleOffsetAfterSyncButton(subtitleOffsetMs, isPlusButton = true)
             -100 -> showSubtitleDialog = true
             -101 -> showPlayerSettingsDialog = true
         }
@@ -4736,6 +4980,7 @@ fun VideoPlayerScreen(
         if (useVlcFallback) {
             exoPlayer.pause()
             vlcPlayer.isAssSubtitleActive = isAssFallback
+            vlcPlayer.isEmbeddedSubtitleActive = useVlcNativeSubtitle
             
             // VLC 내장 ASS 렌더러(libass)는 자막을 영상 위에 직접 합성하므로 자막만 따로 움직일 수 없습니다.
             // 컨트롤바가 나오면 영상 자체를 위로 살짝 올려 자막이 가리지 않도록 합니다.
@@ -5187,9 +5432,9 @@ fun VideoPlayerScreen(
                     // ─── 자막싱크: 0s [－][＋] ───
                     Text("자막싱크", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
                     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 14) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = (subtitleOffsetMs - 500L).coerceIn(-30000L, 30000L); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 14) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = subtitleOffsetAfterSyncButton(subtitleOffsetMs, isPlusButton = false); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("－", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
                         Text(if (subtitleOffsetMs == 0L) "0s" else "${if (subtitleOffsetMs > 0) "+" else ""}${subtitleOffsetMs / 1000f}s", color = if (subtitleOffsetMs != 0L) Color(0xFFFFD54F) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.widthIn(min = 32.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 15) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = (subtitleOffsetMs + 500L).coerceIn(-30000L, 30000L); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                        Box(Modifier.size(28.dp).background(if (focusedButtonIndex == 15) PrimaryColor else Color.White.copy(alpha = 0.15f), androidx.compose.foundation.shape.CircleShape).clickable { subtitleOffsetMs = subtitleOffsetAfterSyncButton(subtitleOffsetMs, isPlusButton = true); resetHideTimer() }, contentAlignment = androidx.compose.ui.Alignment.Center) { Text("＋", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
                     }
 
                     Box(Modifier.width(110.dp).height(1.dp).background(Color.White.copy(alpha = 0.12f)))
@@ -5406,6 +5651,50 @@ fun VideoPlayerScreen(
             },
             text = {
                 Column {
+                    if (finalSubtitleUrl != null) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    castSubtitleBurnIn = !castSubtitleBurnIn
+                                    SettingsStore.saveCastSubtitleBurnInEnabled(context, castSubtitleBurnIn)
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("외장 자막을 영상에 입혀서 재생", fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "(내장 자막으로 나올 시 외장 자막을 입혀서 제공합니다.)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                                )
+                                Text(
+                                    if (castSubtitleBurnIn) "현재 ON · 변환 완료 후 재생됩니다."
+                                    else "현재 OFF · 기존 DLNA 전송 방식을 사용합니다.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                                )
+                            }
+                            Switch(
+                                checked = castSubtitleBurnIn,
+                                onCheckedChange = { enabled ->
+                                    castSubtitleBurnIn = enabled
+                                    SettingsStore.saveCastSubtitleBurnInEnabled(context, enabled)
+                                }
+                            )
+                        }
+                        if (castSubtitleBurnIn) {
+                            Text(
+                                "파일 전체를 변환하므로 초기 대기시간과 임시 저장공간이 필요합니다. 변환 중에는 재생이 시작되지 않으며, 실패하면 기존 방식으로 전환합니다.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Divider(color = MaterialTheme.colorScheme.outlineVariant)
+                            Spacer(Modifier.height(8.dp))
+                        }
+                    }
                     if (isCasting && currentRenderer != null) {
                         Box(
                             modifier = Modifier
@@ -5462,8 +5751,27 @@ fun VideoPlayerScreen(
                                     )
                                     .clickable {
                                         showRendererDialog = false
-                                        val currentPos = exoPlayer.currentPosition.coerceAtLeast(0L)
-                                        onCastToDevice(device, finalSubtitleUrl, currentPos)
+                                        // ASS/SSA playback is handled by LibVLC, so ExoPlayer can remain at 0.
+                                        // Always read the position from the player that currently owns playback.
+                                        val currentPos = if (useVlcFallback) {
+                                            vlcPlayer.getCurrentPosition()
+                                        } else {
+                                            exoPlayer.currentPosition
+                                        }.coerceAtLeast(0L)
+                                        castPreparationInProgress = castSubtitleBurnIn && finalSubtitleUrl != null
+                                        castPreparationProgress = null
+                                        castPreparationElapsedSeconds = 0L
+                                        castPreparationStartedAt = android.os.SystemClock.elapsedRealtime()
+                                        onCastToDevice(
+                                            device,
+                                            finalSubtitleUrl,
+                                            currentPos,
+                                            castSubtitleBurnIn,
+                                            subtitleOffsetMs,
+                                            { progress -> castPreparationProgress = progress }
+                                        ) {
+                                            castPreparationInProgress = false
+                                        }
                                     }
                                     .padding(12.dp)
                             ) {
@@ -5508,6 +5816,43 @@ fun VideoPlayerScreen(
                     }
                 }
             }
+        )
+    }
+
+    if (castPreparationInProgress) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("전송 준비 중") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        castPreparationProgress?.let { "변환 진행률: $it%" } ?: "영상 분석 및 변환을 준비하고 있습니다…",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    if (castPreparationProgress == null) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { (castPreparationProgress!! / 100f).coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    val elapsed = castPreparationElapsedSeconds
+                    val hours = elapsed / 3600L
+                    val minutes = (elapsed % 3600L) / 60L
+                    val seconds = elapsed % 60L
+                    Text(
+                        String.format(java.util.Locale.US, "경과 시간: %02d:%02d:%02d", hours, minutes, seconds),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        "파일 전체를 변환하므로 수분에서 수십 분 걸릴 수 있습니다. 영상 길이·기기 성능·네트워크 속도에 따라 더 오래 걸릴 수 있으며, 변환이 끝나면 재생이 시작됩니다.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+                    )
+                }
+            },
+            confirmButton = {}
         )
     }
 
@@ -6613,6 +6958,66 @@ fun convertSmiToSrt(smiText: String): String {
     return srt.toString()
 }
 
+/** Converts ASS/SSA dialogue events to the SRT format supported by most DLNA TVs. */
+fun convertAssToSrt(assText: String): String {
+    val defaultEventFormat = listOf(
+        "layer", "start", "end", "style", "name",
+        "marginl", "marginr", "marginv", "effect", "text"
+    )
+    var eventFormat = defaultEventFormat
+    val cues = mutableListOf<SubtitleCue>()
+
+    fun parseAssTime(value: String): Long? {
+        val match = Regex("""^(\d+):(\d{2}):(\d{2})[.](\d{1,3})$""").matchEntire(value.trim()) ?: return null
+        val hours = match.groupValues[1].toLongOrNull() ?: return null
+        val minutes = match.groupValues[2].toLongOrNull() ?: return null
+        val seconds = match.groupValues[3].toLongOrNull() ?: return null
+        val fraction = match.groupValues[4]
+        val millis = when (fraction.length) {
+            1 -> fraction.toLongOrNull()?.times(100L)
+            2 -> fraction.toLongOrNull()?.times(10L)
+            else -> fraction.take(3).toLongOrNull()
+        } ?: return null
+        return ((hours * 60L + minutes) * 60L + seconds) * 1000L + millis
+    }
+
+    assText.lineSequence().forEach { rawLine ->
+        val line = rawLine.trim()
+        if (line.startsWith("Format:", ignoreCase = true)) {
+            val fields = line.substringAfter(':').split(',').map { it.trim().lowercase() }
+            if (fields.any { it == "start" } && fields.any { it == "end" } && fields.any { it == "text" }) {
+                eventFormat = fields
+            }
+            return@forEach
+        }
+        if (!line.startsWith("Dialogue:", ignoreCase = true)) return@forEach
+
+        // Keep commas in the final Text field while still honoring a custom [Events] Format line.
+        val fields = line.substringAfter(':').split(',', limit = eventFormat.size)
+        if (fields.size < eventFormat.size) return@forEach
+        val startIndex = eventFormat.indexOf("start")
+        val endIndex = eventFormat.indexOf("end")
+        val textIndex = eventFormat.indexOf("text")
+        if (startIndex < 0 || endIndex < 0 || textIndex < 0) return@forEach
+
+        val startMs = parseAssTime(fields[startIndex]) ?: return@forEach
+        val endMs = parseAssTime(fields[endIndex]) ?: return@forEach
+        val subtitleText = fields[textIndex]
+            // Android's ICU regex engine rejects an unescaped closing brace, unlike some JVMs.
+            .replace(Regex("""\{[^}]*\}"""), "")
+            .replace(Regex("\\\\[Nn]"), "\n")
+            .replace(Regex("\\\\h"), " ")
+            .trim()
+        if (subtitleText.isNotEmpty() && endMs > startMs) {
+            cues += SubtitleCue(startMs, endMs, subtitleText)
+        }
+    }
+
+    return cues.mapIndexed { index, cue ->
+        "${index + 1}\n${formatSrtTime(cue.startTimeMs)} --> ${formatSrtTime(cue.endTimeMs)}\n${cue.text}"
+    }.joinToString("\n\n", postfix = if (cues.isEmpty()) "" else "\n\n")
+}
+
 fun formatSrtTime(ms: Long): String {
     val h = ms / 3600000
     val m = (ms % 3600000) / 60000
@@ -6620,6 +7025,18 @@ fun formatSrtTime(ms: Long): String {
     val msRem = ms % 1000
     return String.format(java.util.Locale.US, "%02d:%02d:%02d,%03d", h, m, s, msRem)
 }
+
+/** The sync controls intentionally use reversed +/- behavior: plus advances, minus delays. */
+fun subtitleOffsetAfterSyncButton(offsetMs: Long, isPlusButton: Boolean): Long {
+    val delta = if (isPlusButton) -500L else 500L
+    return (offsetMs + delta).coerceIn(-30000L, 30000L)
+}
+
+/** External subtitle sync must not react to transient embedded-track list changes. */
+fun shouldUseNativeEmbeddedSubtitleForSync(
+    subtitleUrl: String?,
+    selectedEmbeddedSubtitle: Boolean
+): Boolean = subtitleUrl == null && selectedEmbeddedSubtitle
 
 /**
  * SRT 자막의 모든 타임스탬프에 오프셋을 적용합니다.
