@@ -1,8 +1,11 @@
 package com.sv21c.jsplayer
 
 import android.content.Context
+import android.util.Log
 import com.google.android.gms.auth.api.signin.GoogleSignInAccount
+import com.google.api.client.googleapis.json.GoogleJsonResponseException
 import com.google.api.client.googleapis.extensions.android.gms.auth.GoogleAccountCredential
+import com.google.api.client.http.HttpResponseException
 import com.google.api.client.http.javanet.NetHttpTransport
 import com.google.api.client.json.gson.GsonFactory
 import com.google.api.services.drive.Drive
@@ -22,6 +25,47 @@ data class GoogleDriveItem(
 }
 
 object GoogleDriveManager {
+    private const val TAG = "GoogleDriveManager"
+
+    /**
+     * Drive API 오류를 Logcat과 브라우저 오류 화면에서 진단할 수 있도록 안전한 요약으로 변환합니다.
+     * 액세스 토큰, Authorization 헤더, 요청 URL/파일 ID는 기록하지 않습니다.
+     */
+    private fun describeListFilesError(error: Exception): String = buildList {
+        add("Google Drive 파일 목록 조회 실패")
+        add("예외 유형: ${error.javaClass.name}")
+
+        when (error) {
+            is GoogleJsonResponseException -> {
+                add("HTTP 상태: ${error.statusCode} ${error.statusMessage.orEmpty()}".trim())
+                error.details?.let { apiError ->
+                    apiError.code?.let { add("Google API 오류 코드: $it") }
+                    apiError.message?.takeIf(String::isNotBlank)?.let {
+                        add("Google API 오류 내용: ${it.take(1200)}")
+                    }
+                    apiError.errors.orEmpty().take(5).forEach { info ->
+                        val fields = listOfNotNull(
+                            info.domain?.takeIf(String::isNotBlank)?.let { "domain=$it" },
+                            info.reason?.takeIf(String::isNotBlank)?.let { "reason=$it" },
+                            info.message?.takeIf(String::isNotBlank)?.let { "message=${it.take(500)}" }
+                        )
+                        if (fields.isNotEmpty()) add("Google API 상세: ${fields.joinToString(", ")}")
+                    }
+                }
+            }
+            is HttpResponseException -> {
+                add("HTTP 상태: ${error.statusCode} ${error.statusMessage.orEmpty()}".trim())
+                error.content?.takeIf(String::isNotBlank)?.let {
+                    add("HTTP 응답 내용: ${it.take(1200)}")
+                }
+            }
+        }
+
+        error.message?.takeIf(String::isNotBlank)?.let { add("예외 메시지: ${it.take(1200)}") }
+        error.cause?.let { cause ->
+            add("원인 예외: ${cause.javaClass.name}: ${cause.message?.take(800).orEmpty()}")
+        }
+    }.joinToString("\n").take(4000)
 
     fun isVideoFile(mimeType: String, name: String): Boolean {
         if (mimeType.startsWith("video/")) return true
@@ -83,7 +127,9 @@ object GoogleDriveManager {
             } ?: emptyList()
             Result.success(items)
         } catch (e: Exception) {
-            Result.failure(e)
+            val diagnostic = describeListFilesError(e)
+            Log.e(TAG, diagnostic, e)
+            Result.failure(IOException(diagnostic, e))
         }
     }
 

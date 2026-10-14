@@ -7906,11 +7906,29 @@ fun HomeScreen(
     val googleSignInLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        val account = GoogleDriveAuthManager.handleSignInResult(result.data)
+        val account = GoogleDriveAuthManager.handleSignInResult(context, result.data)
         if (account != null) {
             onGoogleDriveSuccess(account)
         } else {
-            android.widget.Toast.makeText(context, "Google 로그인이 실패하거나 취소되었습니다.", android.widget.Toast.LENGTH_SHORT).show()
+            val errorDetails = GoogleDriveAuthManager.consumeLastSignInErrorMessage()
+                ?: "Google 로그인 실패: 상세 오류 정보가 전달되지 않았습니다.\nresultCode=${result.resultCode}"
+
+            // Toast는 OS 버전에 따라 긴 문구가 잘릴 수 있어 전체 진단 내용도 상세 창에 표시합니다.
+            android.widget.Toast.makeText(context, errorDetails, android.widget.Toast.LENGTH_LONG).show()
+            if (!errorDetails.contains("SIGN_IN_CANCELLED")) {
+                android.app.AlertDialog.Builder(context)
+                    .setTitle("Google Drive 로그인 오류")
+                    .setMessage(errorDetails)
+                    .setPositiveButton("닫기", null)
+                    .setNeutralButton("오류 복사") { _, _ ->
+                        val clipboard = context.getSystemService(android.content.ClipboardManager::class.java)
+                        clipboard?.setPrimaryClip(
+                            android.content.ClipData.newPlainText("Google Drive 로그인 오류", errorDetails)
+                        )
+                        android.widget.Toast.makeText(context, "오류 정보가 복사되었습니다.", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                    .show()
+            }
         }
     }
 

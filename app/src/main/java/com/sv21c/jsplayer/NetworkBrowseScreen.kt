@@ -13,8 +13,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Cloud
@@ -303,12 +306,38 @@ fun NetworkBrowseScreen(
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Icon(Icons.Default.Warning, null, tint = accentColor, modifier = Modifier.size(48.dp))
-                        Text(
-                            text = errorMessage ?: "",
-                            color = MaterialTheme.colorScheme.error,
-                            textAlign = TextAlign.Center,
-                            style = MaterialTheme.typography.bodySmall
-                        )
+                        SelectionContainer {
+                            Text(
+                                text = errorMessage ?: "",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 320.dp)
+                                    .verticalScroll(rememberScrollState()),
+                                color = MaterialTheme.colorScheme.error,
+                                textAlign = TextAlign.Start,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        if (credentials.type == "GOOGLE_DRIVE") {
+                            OutlinedButton(
+                                onClick = {
+                                    val clipboard = context.getSystemService(android.content.ClipboardManager::class.java)
+                                    clipboard?.setPrimaryClip(
+                                        android.content.ClipData.newPlainText(
+                                            "Google Drive 오류 정보",
+                                            errorMessage.orEmpty()
+                                        )
+                                    )
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        "Google Drive 오류 정보가 복사되었습니다.",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            ) {
+                                Text("오류 정보 복사")
+                            }
+                        }
                         Button(
                             onClick = { loadPath(customPath) },
                             colors = ButtonDefaults.buttonColors(containerColor = accentColor)
