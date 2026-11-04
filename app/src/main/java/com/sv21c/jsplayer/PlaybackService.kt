@@ -12,9 +12,18 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 
 class PlaybackService : MediaSessionService() {
+    private var floatingPlayerOverlay: FloatingPlayerOverlay? = null
+
+    companion object {
+        @Volatile private var runningInstance: PlaybackService? = null
+
+        internal fun currentInstance(): PlaybackService? = runningInstance
+    }
 
     override fun onCreate() {
         super.onCreate()
+        runningInstance = this
+        floatingPlayerOverlay = FloatingPlayerOverlay(this)
         
         // MediaController 바인딩 없이 직접 서비스를 시작했으므로, 
         // 서비스 생성 시점에 강제로(직접) MediaSession을 만들고 addSession() 해줘야 알림창이 생성됩니다.
@@ -61,6 +70,10 @@ class PlaybackService : MediaSessionService() {
                         ): ListenableFuture<SessionResult> {
                             if (customCommand.customAction == actionClose) {
                                 // X 버튼 터치 시 플레이 종료 및 알림창 강제 삭제
+                                if (PlayerSingleton.isFloatingPlayerActive) {
+                                    floatingPlayerOverlay?.hide(restoreActivitySurface = true)
+                                    PlayerSingleton.vlcPlayer?.pause()
+                                }
                                 session.player.stop()
                                 session.player.clearMediaItems()
                                 stopSelf()
@@ -85,15 +98,58 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        floatingPlayerOverlay?.hide(restoreActivitySurface = true)
+        floatingPlayerOverlay = null
         PlayerSingleton.mediaSession?.let {
             removeSession(it)
             it.release()
         }
         PlayerSingleton.mediaSession = null
+        PlayerSingleton.isFloatingPlayerActive = false
+        runningInstance = null
         super.onDestroy()
     }
 
+    fun showFloatingPlayer(
+        useVlc: Boolean,
+        title: String,
+        seekSeconds: Int,
+        videoWidth: Int,
+        videoHeight: Int
+    ): Boolean {
+        val overlay = floatingPlayerOverlay ?: return false
+        val shown = overlay.show(
+            useVlc = useVlc,
+            title = title,
+            seekSeconds = seekSeconds,
+            videoWidth = videoWidth,
+            videoHeight = videoHeight,
+            onOpenApp = { returnToApp() },
+            onClosePlayer = { closeFloatingPlayer() }
+        )
+        if (shown) PlayerSingleton.isFloatingPlayerActive = true
+        return shown
+    }
+
+    private fun returnToApp() {
+        floatingPlayerOverlay?.hide(restoreActivitySurface = true)
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        startActivity(intent)
+    }
+
+    private fun closeFloatingPlayer() {
+        floatingPlayerOverlay?.hide(restoreActivitySurface = true)
+        PlayerSingleton.player?.pause()
+        PlayerSingleton.vlcPlayer?.pause()
+    }
+
     override fun onTaskRemoved(rootIntent: Intent?) {
+        // The player is intentionally running outside the Activity in the user's floating window.
+        if (PlayerSingleton.isFloatingPlayerActive) return
         val player = PlayerSingleton.mediaSession?.player
         if (player != null) {
             if (!player.playWhenReady || player.mediaItemCount == 0) {

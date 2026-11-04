@@ -61,6 +61,10 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitTouchSlopOrCancellation
+import androidx.compose.foundation.gestures.drag
 import androidx.compose.ui.graphics.graphicsLayer
 import kotlinx.coroutines.delay
 import android.Manifest
@@ -109,6 +113,7 @@ import android.net.Uri
 import android.content.Intent
 import android.app.AppOpsManager
 import android.content.Context
+import kotlin.math.roundToInt
 
 sealed class ScreenState {
     object Home : ScreenState()
@@ -187,16 +192,35 @@ class MainActivity : ComponentActivity() {
     private var wasInPipMode = false
     private var pipExoPlayer: ExoPlayer? = null
     private var isVideoScreenActive = false
+    private var pipAspectRatio = Rational(16, 9)
+    private var pipSeekIntervalMs = 10_000L
+    private var pipIsPlaying = true
+    private var pipSeekBackwardAction: (() -> Unit)? = null
+    private var pipTogglePlaybackAction: (() -> Boolean)? = null
+    private var pipSeekForwardAction: (() -> Unit)? = null
+    private data class FloatingPlayerRequest(
+        val useVlc: Boolean,
+        val title: String,
+        val seekSeconds: Int,
+        val videoWidth: Int,
+        val videoHeight: Int
+    )
+    private var pendingFloatingPlayerRequest: FloatingPlayerRequest? = null
+    private var overlaySettingsLaunched = false
 
     private val pipBroadcastReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
-            if (intent?.action == PIP_ACTION_PLAY_PAUSE) {
-                pipExoPlayer?.let { player ->
-                    if (player.isPlaying) player.pause() else player.play()
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        updatePipActions(player.isPlaying)
+            when (intent?.action) {
+                PIP_ACTION_PLAY_PAUSE -> {
+                    val isPlaying = pipTogglePlaybackAction?.invoke() ?: run {
+                        val player = pipExoPlayer ?: return
+                        if (player.isPlaying) player.pause() else player.play()
+                        player.isPlaying
                     }
+                    updatePipActions(isPlaying)
                 }
+                PIP_ACTION_SEEK_BACK -> pipSeekBackwardAction?.invoke() ?: seekPipPlayer(-pipSeekIntervalMs)
+                PIP_ACTION_SEEK_FORWARD -> pipSeekForwardAction?.invoke() ?: seekPipPlayer(pipSeekIntervalMs)
             }
         }
     }
@@ -314,6 +338,8 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val PIP_ACTION_PLAY_PAUSE = "com.sv21c.jsplayer.PIP_PLAY_PAUSE"
+        const val PIP_ACTION_SEEK_BACK = "com.sv21c.jsplayer.PIP_SEEK_BACK"
+        const val PIP_ACTION_SEEK_FORWARD = "com.sv21c.jsplayer.PIP_SEEK_FORWARD"
         init {
             System.setProperty("java.net.preferIPv4Stack", "true")
             System.setProperty("org.slf4j.simpleLogger.logFile", "System.out")
@@ -367,7 +393,11 @@ class MainActivity : ComponentActivity() {
 
         // PIP 브로드캐스트 리시버 등록
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val pipFilter = IntentFilter(PIP_ACTION_PLAY_PAUSE)
+            val pipFilter = IntentFilter().apply {
+                addAction(PIP_ACTION_PLAY_PAUSE)
+                addAction(PIP_ACTION_SEEK_BACK)
+                addAction(PIP_ACTION_SEEK_FORWARD)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(pipBroadcastReceiver, pipFilter, RECEIVER_NOT_EXPORTED)
             } else {
@@ -1963,6 +1993,27 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         wasInPipMode = false
+        if (overlaySettingsLaunched) {
+            overlaySettingsLaunched = false
+            val request = pendingFloatingPlayerRequest
+            pendingFloatingPlayerRequest = null
+            if (request != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Settings.canDrawOverlays(this)) {
+                    showFloatingPlayer(
+                        request.useVlc,
+                        request.title,
+                        request.seekSeconds,
+                        request.videoWidth,
+                        request.videoHeight
+                    )
+                } else {
+                    Toast.makeText(this, "권한이 허용되지 않아 시스템 PiP를 사용하거나 다시 시도해 주세요.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        if (!PlayerSingleton.isFloatingPlayerActive) {
+            pipExoPlayer?.let { updatePipActions(it.isPlaying) }
+        }
     }
 
     override fun onStart() {
@@ -2042,9 +2093,75 @@ class MainActivity : ComponentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (isVideoScreenActive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+        if (!PlayerSingleton.isFloatingPlayerActive && isVideoScreenActive &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+        ) {
             enterPipMode()
         }
+    }
+
+    fun openFloatingPlayerPermissionSettings(
+        useVlc: Boolean,
+        title: String,
+        seekSeconds: Int,
+        videoWidth: Int,
+        videoHeight: Int
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            Toast.makeText(this, "이 Android 버전에서는 플로팅 플레이어를 지원하지 않습니다.", Toast.LENGTH_LONG).show()
+            return
+        }
+        pendingFloatingPlayerRequest = FloatingPlayerRequest(
+            useVlc, title, seekSeconds, videoWidth, videoHeight
+        )
+        try {
+            overlaySettingsLaunched = true
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+            )
+        } catch (e: Exception) {
+            overlaySettingsLaunched = false
+            pendingFloatingPlayerRequest = null
+            Toast.makeText(this, "오버레이 권한 설정을 열 수 없습니다: ${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun showFloatingPlayer(
+        useVlc: Boolean,
+        title: String,
+        seekSeconds: Int,
+        videoWidth: Int,
+        videoHeight: Int
+    ): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || !Settings.canDrawOverlays(this)) return false
+
+        // Set this before updating PiP params so Android 12+ doesn't also auto-enter system PiP.
+        PlayerSingleton.isFloatingPlayerActive = true
+        val serviceIntent = Intent(this, PlaybackService::class.java)
+        try {
+            startService(serviceIntent)
+        } catch (e: Exception) {
+            PlayerSingleton.isFloatingPlayerActive = false
+            Log.e("MainActivity", "플로팅 플레이어 서비스 시작 실패", e)
+            Toast.makeText(this, "플로팅 플레이어를 시작할 수 없습니다: ${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+            return false
+        }
+
+        val shown = PlaybackService.currentInstance()?.showFloatingPlayer(
+            useVlc, title, seekSeconds, videoWidth, videoHeight
+        ) == true
+        if (!shown) {
+            PlayerSingleton.isFloatingPlayerActive = false
+            Toast.makeText(this, "플로팅 플레이어를 표시하지 못했습니다. 시스템 PiP를 사용해 주세요.", Toast.LENGTH_LONG).show()
+            return false
+        }
+
+        updatePipActions(pipExoPlayer?.isPlaying ?: true)
+        moveTaskToBack(true)
+        return true
     }
 
     fun setPipPlayer(player: ExoPlayer?) {
@@ -2062,29 +2179,74 @@ class MainActivity : ComponentActivity() {
 
     fun enterPipMode() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (!isPipPermissionGranted()) {
+                Toast.makeText(this, "시스템 PiP 권한이 꺼져 있습니다. 앱 설정에서 PiP를 허용하거나 플로팅 플레이어를 사용해 주세요.", Toast.LENGTH_LONG).show()
+                return
+            }
             val isPlaying = pipExoPlayer?.isPlaying ?: true
-            val params = PictureInPictureParams.Builder()
-                .setAspectRatio(Rational(16, 9))
-                .setActions(buildPipRemoteActions(isPlaying))
-                .build()
-            enterPictureInPictureMode(params)
+            try {
+                enterPictureInPictureMode(buildPipParams(isPlaying))
+            } catch (e: Exception) {
+                Log.e("MainActivity", "시스템 PiP 시작 실패", e)
+                Toast.makeText(this, "시스템 PiP 시작 실패: ${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
-    fun updatePipActions(isPlaying: Boolean) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val builder = PictureInPictureParams.Builder()
-                .setAspectRatio(Rational(16, 9))
-                .setActions(buildPipRemoteActions(isPlaying))
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                builder.setAutoEnterEnabled(true)
-            }
-            setPictureInPictureParams(builder.build())
+    /** 영상 비율을 PiP에 반영해 창 안에서 영상이 불필요하게 레터박스되지 않도록 합니다. */
+    fun setPipVideoAspectRatio(width: Int, height: Int) {
+        if (width <= 0 || height <= 0 || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val ratio = width.toDouble() / height.toDouble()
+        if (ratio !in (1.0 / 2.39)..2.39) return
+        pipAspectRatio = Rational(width, height)
+        if (isInPipMode.value) updatePipActions(pipExoPlayer?.isPlaying ?: true)
+    }
+
+    private fun buildPipParams(isPlaying: Boolean): PictureInPictureParams {
+        val builder = PictureInPictureParams.Builder()
+            .setAspectRatio(pipAspectRatio)
+            .setActions(buildPipRemoteActions(isPlaying))
+
+        // 확장 PiP 비율을 지정하면 시스템이 큰 확장 창 전환을 허용합니다.
+        // 일반 PiP만 사용하도록 expandedAspectRatio는 설정하지 않습니다.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setAutoEnterEnabled(!PlayerSingleton.isFloatingPlayerActive)
         }
+        return builder.build()
+    }
+
+    fun updatePipActions(isPlaying: Boolean) {
+        pipIsPlaying = isPlaying
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            setPictureInPictureParams(buildPipParams(isPlaying))
+        }
+    }
+
+    /** Compose 터치에 의존하지 않고 PiP 시스템 RemoteAction에서 실제 플레이어를 조작합니다. */
+    fun setPipControlActions(
+        seekIntervalSeconds: Int,
+        seekBackward: () -> Unit,
+        togglePlayback: () -> Boolean,
+        seekForward: () -> Unit
+    ) {
+        pipSeekIntervalMs = seekIntervalSeconds.coerceAtLeast(1) * 1_000L
+        pipSeekBackwardAction = seekBackward
+        pipTogglePlaybackAction = togglePlayback
+        pipSeekForwardAction = seekForward
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) updatePipActions(pipIsPlaying)
+    }
+
+    private fun seekPipPlayer(offsetMs: Long) {
+        val player = pipExoPlayer ?: return
+        val duration = player.duration.takeIf { it > 0L } ?: Long.MAX_VALUE
+        player.seekTo((player.currentPosition + offsetMs).coerceIn(0L, duration))
     }
 
     fun clearPipParams() {
         pipExoPlayer = null
+        pipSeekBackwardAction = null
+        pipTogglePlaybackAction = null
+        pipSeekForwardAction = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             try {
                 val params = PictureInPictureParams.Builder()
@@ -2097,17 +2259,27 @@ class MainActivity : ComponentActivity() {
 
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
     private fun buildPipRemoteActions(isPlaying: Boolean): List<RemoteAction> {
-        val icon = Icon.createWithResource(this,
-            if (isPlaying) android.R.drawable.ic_media_pause
-            else android.R.drawable.ic_media_play
+        fun action(action: String, requestCode: Int, iconRes: Int, title: String): RemoteAction {
+            val pendingIntent = PendingIntent.getBroadcast(
+                this,
+                requestCode,
+                android.content.Intent(action).setPackage(packageName),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            return RemoteAction(Icon.createWithResource(this, iconRes), title, title, pendingIntent)
+        }
+
+        val seekSeconds = (pipSeekIntervalMs / 1_000L).toInt()
+        return listOf(
+            action(PIP_ACTION_SEEK_BACK, 1, android.R.drawable.ic_media_rew, "${seekSeconds}초 되감기"),
+            action(
+                PIP_ACTION_PLAY_PAUSE,
+                2,
+                if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
+                if (isPlaying) "일시정지" else "재생"
+            ),
+            action(PIP_ACTION_SEEK_FORWARD, 3, android.R.drawable.ic_media_ff, "${seekSeconds}초 빨리감기")
         )
-        val title = if (isPlaying) "일시정지" else "재생"
-        val pendingIntent = PendingIntent.getBroadcast(
-            this, 0,
-            android.content.Intent(PIP_ACTION_PLAY_PAUSE).setPackage(packageName),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        return listOf(RemoteAction(icon, title, title, pendingIntent))
     }
 
     private fun requestPermissions() {
@@ -2796,6 +2968,38 @@ fun BrowseScreen(
     }
 }
 
+@Composable
+private fun PipControlButton(
+    modifier: Modifier = Modifier,
+    label: String,
+    actionLabel: String,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .heightIn(min = 48.dp)
+            .clickable(onClickLabel = actionLabel, onClick = onClick),
+        contentAlignment = androidx.compose.ui.Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .widthIn(min = 44.dp, max = 64.dp)
+                .height(34.dp)
+                .clip(androidx.compose.foundation.shape.RoundedCornerShape(18.dp))
+                .background(Color.White.copy(alpha = 0.16f)),
+            contentAlignment = androidx.compose.ui.Alignment.Center
+        ) {
+            Text(
+                text = label,
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VideoPlayerScreen(
@@ -2827,6 +3031,7 @@ fun VideoPlayerScreen(
     val context = androidx.compose.ui.platform.LocalContext.current
     val activity = context as? android.app.Activity
     val mainActivity = context as? com.sv21c.jsplayer.MainActivity
+    val isInPipMode = mainActivity?.isInPipMode?.value == true
     val PrimaryColor = MaterialTheme.colorScheme.primary
     val totalButtons = 10
     val hasPrevious = playlist.isNotEmpty() && currentIndex > 0
@@ -2834,6 +3039,7 @@ fun VideoPlayerScreen(
 
     // ── 캐스팅 UI 상태 ──
     var showRendererDialog by remember { mutableStateOf(false) }
+    var showFloatingPlayerPermissionDialog by remember { mutableStateOf(false) }
     var castSubtitleBurnIn by remember {
         mutableStateOf(SettingsStore.getCastSubtitleBurnInEnabled(context))
     }
@@ -3000,6 +3206,15 @@ fun VideoPlayerScreen(
             // videoSize 정보가 없는 경우 (VLC 재생 등), 기본적으로 가로 방향 잠금 처리
             activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         }
+    }
+
+    LaunchedEffect(videoSizeState) {
+        val videoSize = videoSizeState ?: return@LaunchedEffect
+        val isRotated = videoSize.unappliedRotationDegrees % 180 != 0
+        val rawWidth = if (isRotated) videoSize.height else videoSize.width
+        val height = if (isRotated) videoSize.width else videoSize.height
+        val width = (rawWidth * videoSize.pixelWidthHeightRatio).roundToInt()
+        mainActivity?.setPipVideoAspectRatio(width, height)
     }
     
     // For Slider Interaction
@@ -3327,6 +3542,11 @@ fun VideoPlayerScreen(
                 onClose()
             }
         }
+    }
+
+    SideEffect {
+        PlayerSingleton.vlcPlayer = vlcPlayer
+        PlayerSingleton.isVlcActive = useVlcFallback
     }
 
 
@@ -4167,16 +4387,21 @@ fun VideoPlayerScreen(
         }
         
         onDispose {
-            mainActivity?.clearPipParams()
-            try {
-                context.stopService(serviceIntent)
-            } catch (e: Exception) {}
-            PlayerSingleton.mediaSession?.release()
-            PlayerSingleton.mediaSession = null
-            PlayerSingleton.player = null
-            // FFmpeg 폴백으로 플레이어가 재생성될 때 이전 인스턴스 정리
-            exoPlayer.release()
-            android.util.Log.d("VideoPlayerScreen", "Previous ExoPlayer instance released")
+            if (!PlayerSingleton.isFloatingPlayerActive) {
+                mainActivity?.clearPipParams()
+                try {
+                    context.stopService(serviceIntent)
+                } catch (e: Exception) {}
+                PlayerSingleton.mediaSession?.release()
+                PlayerSingleton.mediaSession = null
+                PlayerSingleton.player = null
+                PlayerSingleton.activityPlayerView = null
+                // FFmpeg 폴백으로 플레이어가 재생성될 때 이전 인스턴스 정리
+                exoPlayer.release()
+                android.util.Log.d("VideoPlayerScreen", "Previous ExoPlayer instance released")
+            } else {
+                android.util.Log.i("VideoPlayerScreen", "Floating player active; keep ExoPlayer and playback service alive")
+            }
         }
     }
 
@@ -4310,8 +4535,16 @@ fun VideoPlayerScreen(
                 android.util.Log.d("VideoPlayerScreen", "Saved playback position: ${pos}ms / ${dur}ms for $videoUrl")
             }
         }
-        exoPlayer.release()
-        vlcPlayer.release()
+        if (!PlayerSingleton.isFloatingPlayerActive) {
+            PlayerSingleton.activityPlayerView = null
+            PlayerSingleton.activityVlcSurface = null
+            PlayerSingleton.vlcPlayer = null
+            PlayerSingleton.isVlcActive = false
+            exoPlayer.release()
+            vlcPlayer.release()
+        } else {
+            android.util.Log.i("VideoPlayerScreen", "Floating player active; keep playback instances alive on screen disposal")
+        }
     } }
 
     // BackHandler는 직접 사용하지 않음.
@@ -4327,9 +4560,9 @@ fun VideoPlayerScreen(
     }
 
     // --- Position update (500ms) ---
-    LaunchedEffect(exoPlayer, useVlcFallback, isControlVisible, isCasting, isLongPressing) {
+    LaunchedEffect(exoPlayer, useVlcFallback, isControlVisible, isCasting, isLongPressing, isInPipMode) {
         while (true) {
-            val shouldUpdate = isControlVisible || isCasting || isLongPressing
+            val shouldUpdate = isControlVisible || isInPipMode || isCasting || isLongPressing
             if (shouldUpdate) {
                 if (useVlcFallback) {
                     // VLC 재생 시 VLC에서 위치/재생시간 읽기
@@ -4348,6 +4581,10 @@ fun VideoPlayerScreen(
             }
             delay(500L)
         }
+    }
+
+    LaunchedEffect(isInPipMode, isPlaying) {
+        if (isInPipMode) mainActivity?.updatePipActions(isPlaying)
     }
 
     LaunchedEffect(lastSeekTriggerTime) {
@@ -4421,7 +4658,24 @@ fun VideoPlayerScreen(
                 if (useVlcFallback) vlcPlayer.setSpeed(currentSpeed) else exoPlayer.setPlaybackSpeed(currentSpeed)
             }
             10 -> isOrientationLocked = !isOrientationLocked // 회전 잠금/해제 토글
-            11 -> { mainActivity?.enterPipMode(); return }
+            11 -> {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                    mainActivity?.enterPipMode()
+                } else if (Settings.canDrawOverlays(context)) {
+                    val videoSize = videoSizeState
+                    val started = mainActivity?.showFloatingPlayer(
+                        useVlc = useVlcFallback,
+                        title = title,
+                        seekSeconds = seekTime,
+                        videoWidth = videoSize?.width?.takeIf { it > 0 } ?: 16,
+                        videoHeight = videoSize?.height?.takeIf { it > 0 } ?: 9
+                    ) == true
+                    if (!started) mainActivity?.enterPipMode()
+                } else {
+                    showFloatingPlayerPermissionDialog = true
+                }
+                return
+            }
             12 -> { onClose(); return }
             13 -> { showRendererDialog = true } // 캐스트 버튼
             14 -> subtitleOffsetMs = subtitleOffsetAfterSyncButton(subtitleOffsetMs, isPlusButton = false)
@@ -4430,6 +4684,41 @@ fun VideoPlayerScreen(
             -101 -> showPlayerSettingsDialog = true
         }
         resetHideTimer()
+    }
+
+    // PiP는 Compose의 앱 내부 버튼 터치를 전달하지 않으므로 OS가 제공하는 RemoteAction에 연결합니다.
+    LaunchedEffect(mainActivity, exoPlayer, seekTime, useVlcFallback) {
+        mainActivity?.setPipControlActions(
+            seekIntervalSeconds = seekTime,
+            seekBackward = {
+                val offsetMs = seekTime * 1_000L
+                if (useVlcFallback) {
+                    vlcPlayer.seekTo((vlcPlayer.getCurrentPosition() - offsetMs).coerceAtLeast(0L))
+                } else {
+                    exoPlayer.seekTo((exoPlayer.currentPosition - offsetMs).coerceAtLeast(0L))
+                }
+            },
+            togglePlayback = {
+                if (useVlcFallback) {
+                    if (vlcPlayer.isPlaying()) vlcPlayer.pause() else vlcPlayer.resume()
+                    vlcPlayer.isPlaying()
+                } else {
+                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                    exoPlayer.isPlaying
+                }
+            },
+            seekForward = {
+                val offsetMs = seekTime * 1_000L
+                if (useVlcFallback) {
+                    val duration = vlcPlayer.getDuration().coerceAtLeast(0L)
+                    val target = vlcPlayer.getCurrentPosition() + offsetMs
+                    vlcPlayer.seekTo(if (duration > 0L) target.coerceAtMost(duration) else target)
+                } else {
+                    val duration = exoPlayer.duration.coerceAtLeast(0L)
+                    exoPlayer.seekTo((exoPlayer.currentPosition + offsetMs).coerceAtMost(duration))
+                }
+            }
+        )
     }
 
     // --- Focus for key events ---
@@ -4884,6 +5173,7 @@ fun VideoPlayerScreen(
                     }
                     
                     playerView.apply {
+                        PlayerSingleton.activityPlayerView = this
                         player = exoPlayer
                         useController = false // Use custom TV controller
                         keepScreenOn = true // 재생 중 화면 꺼짐 방지
@@ -4946,11 +5236,12 @@ fun VideoPlayerScreen(
                         else androidx.media3.ui.SubtitleView.VIEW_TYPE_CANVAS
                     )
                     
+                    val pipSubtitleMultiplier = if (isInPipMode) 2.0f else 1.0f
                     playerView.subtitleView?.setFractionalTextSize(
-                        androidx.media3.ui.SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * subtitleScale
+                        androidx.media3.ui.SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * subtitleScale * pipSubtitleMultiplier
                     )
                     
-                    val showOverlay = isControlVisible && (mainActivity?.isInPipMode?.value != true)
+                    val showOverlay = isControlVisible && !isInPipMode
                     playerView.subtitleView?.setBottomPaddingFraction(
                         if (showOverlay) 0.45f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION
                     )
@@ -4984,7 +5275,7 @@ fun VideoPlayerScreen(
             
             // VLC 내장 ASS 렌더러(libass)는 자막을 영상 위에 직접 합성하므로 자막만 따로 움직일 수 없습니다.
             // 컨트롤바가 나오면 영상 자체를 위로 살짝 올려 자막이 가리지 않도록 합니다.
-            val showOverlay = isControlVisible && (mainActivity?.isInPipMode?.value != true)
+            val showOverlay = isControlVisible && !isInPipMode
             val targetVlcYOffset = if (showOverlay && isAssFallback) (-100).dp else 0.dp
             val vlcYOffset = androidx.compose.animation.core.animateDpAsState(
                 targetValue = targetVlcYOffset,
@@ -5006,10 +5297,22 @@ fun VideoPlayerScreen(
                                 override fun surfaceChanged(h: android.view.SurfaceHolder, f: Int, w: Int, h2: Int) {
                                     // ★ 핵심: 실제 화면 크기(w, h2)가 확정된 후 재생/크기 업데이트
                                     android.util.Log.i("ExoPlayer_Debug", "📐 VLC surfaceChanged: ${w}x${h2}")
-                                    vlcPlayer.onSurfaceReady(sv, w, h2)
+                                    PlayerSingleton.activityVlcSurface = sv
+                                    PlayerSingleton.activityVlcSurfaceWidth = w
+                                    PlayerSingleton.activityVlcSurfaceHeight = h2
+                                    if (!PlayerSingleton.isFloatingPlayerActive) {
+                                        vlcPlayer.onSurfaceReady(sv, w, h2)
+                                    }
                                 }
                                 override fun surfaceDestroyed(h: android.view.SurfaceHolder) {
-                                    vlcPlayer.releaseMediaPlayer()
+                                    if (PlayerSingleton.activityVlcSurface === sv) {
+                                        PlayerSingleton.activityVlcSurface = null
+                                        PlayerSingleton.activityVlcSurfaceWidth = 0
+                                        PlayerSingleton.activityVlcSurfaceHeight = 0
+                                    }
+                                    if (!PlayerSingleton.isFloatingPlayerActive) {
+                                        vlcPlayer.releaseMediaPlayer()
+                                    }
                                 }
                             })
                         }
@@ -5030,7 +5333,8 @@ fun VideoPlayerScreen(
                             vlcPlayer = vlcPlayer,
                             subtitleScale = subtitleScale,
                             subtitleOffsetMs = subtitleOffsetMs,
-                            isControlVisible = isControlVisible && (mainActivity?.isInPipMode?.value != true)
+                            isControlVisible = isControlVisible && (mainActivity?.isInPipMode?.value != true),
+                            isInPipMode = isInPipMode
                         )
                     }
                 }
@@ -5047,7 +5351,11 @@ fun VideoPlayerScreen(
                     )
                 }
             }
-            DisposableEffect(Unit) { onDispose { vlcPlayer.releaseMediaPlayer() } }
+            DisposableEffect(Unit) {
+                onDispose {
+                    if (!PlayerSingleton.isFloatingPlayerActive) vlcPlayer.releaseMediaPlayer()
+                }
+            }
         }
 
         // --- Zoom Indicator (상단 중앙) ---
@@ -5077,14 +5385,17 @@ fun VideoPlayerScreen(
             }
         }
 
-        val showOverlay = isControlVisible && (mainActivity?.isInPipMode?.value != true)
+        val showOverlay = isControlVisible && !isInPipMode
 
         // --- Title Overlay (Top Center) ---
         androidx.compose.animation.AnimatedVisibility(
             visible = showOverlay,
             enter = androidx.compose.animation.fadeIn(tween(250)) + androidx.compose.animation.slideInVertically(tween(300)) { -it },
             exit = androidx.compose.animation.fadeOut(tween(250)) + androidx.compose.animation.slideOutVertically(tween(300)) { -it },
-            modifier = Modifier.align(androidx.compose.ui.Alignment.TopCenter).padding(top = 16.dp)
+            modifier = Modifier
+                .align(androidx.compose.ui.Alignment.TopCenter)
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(top = 16.dp)
         ) {
             Text(
                 text = title,
@@ -5117,7 +5428,8 @@ fun VideoPlayerScreen(
                     .background(
                         Brush.verticalGradient(listOf(Color.Transparent, Color(0xE6180F23), Color(0xFF180F23)))
                     )
-                    .padding(start = 72.dp, end = 72.dp, top = 20.dp, bottom = if (isPortrait) 56.dp else 8.dp)
+                    .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
+                    .padding(start = 72.dp, end = 72.dp, top = 20.dp, bottom = if (isPortrait) 56.dp else 16.dp)
             ) {
                 // Progress Slider (Interactive)
                 if (showProgressBar) {
@@ -5204,7 +5516,7 @@ fun VideoPlayerScreen(
                         ) {
                             TvControlButton(label = if (isOrientationLocked) "회전\n잠금" else "회전\n해제", isFocused = focusedButtonIndex == 10, highlightColor = PrimaryColor, onClick = { executeButton(10) })
                             Spacer(Modifier.width(16.dp))
-                            TvControlButton(label = "PIP\n화면", isFocused = focusedButtonIndex == 11, highlightColor = PrimaryColor, onClick = { executeButton(11) })
+                            TvControlButton(label = "PIP\n재생", isFocused = focusedButtonIndex == 11, highlightColor = PrimaryColor, onClick = { executeButton(11) })
                             Spacer(Modifier.width(16.dp))
                             TvControlButton(label = if (isCasting) "📺\n연결✓" else "📺\n캐스트", isFocused = focusedButtonIndex == 13, highlightColor = if (isCasting) Color(0xFF4CAF50) else PrimaryColor, onClick = { executeButton(13) })
                         }
@@ -5227,12 +5539,163 @@ fun VideoPlayerScreen(
                         Spacer(Modifier.width(16.dp))
                         TvControlButton(label = if (isOrientationLocked) "회전\n잠금" else "회전\n해제", isFocused = focusedButtonIndex == 10, highlightColor = PrimaryColor, onClick = { executeButton(10) })
                         Spacer(Modifier.width(16.dp))
-                        TvControlButton(label = "PIP\n화면", isFocused = focusedButtonIndex == 11, highlightColor = PrimaryColor, onClick = { executeButton(11) })
+                        TvControlButton(label = "PIP\n재생", isFocused = focusedButtonIndex == 11, highlightColor = PrimaryColor, onClick = { executeButton(11) })
                         Spacer(Modifier.width(16.dp))
                         TvControlButton(label = if (isCasting) "📺\n연결✓" else "📺\n캐스트", isFocused = focusedButtonIndex == 13, highlightColor = if (isCasting) Color(0xFF4CAF50) else PrimaryColor, onClick = { executeButton(13) })
                     }
                 }
 
+            }
+        }
+
+        androidx.compose.animation.AnimatedVisibility(
+            // 현재 위치 표시는 유지하고, 조작 버튼은 시스템 PiP 메뉴의 RemoteAction으로 제공합니다.
+            visible = isInPipMode,
+            enter = androidx.compose.animation.fadeIn(tween(120)),
+            exit = androidx.compose.animation.fadeOut(tween(120)),
+            modifier = Modifier.align(androidx.compose.ui.Alignment.BottomCenter)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, Color(0xD9161020), Color(0xF5161020))
+                        )
+                    )
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                val displayedPosition = when {
+                    isDragging -> dragPosition
+                    useVlcFallback && vlcTargetSeekPosition != null -> vlcTargetSeekPosition!!
+                    else -> currentPosition
+                }.coerceIn(0L, totalDuration.coerceAtLeast(1L))
+
+                // 현재/전체 시간과 진행 표시를 한 줄에 배치해 작은 PiP에서도 위치를 쉽게 확인합니다.
+                androidx.compose.foundation.layout.BoxWithConstraints(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .pointerInput(totalDuration) {
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                fun updatePosition(x: Float) {
+                                    val fraction = (x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f)
+                                    dragPosition = (totalDuration.coerceAtLeast(1L) * fraction).toLong()
+                                }
+                                val dragStart = awaitTouchSlopOrCancellation(down.id) { change, _ ->
+                                    isDragging = true
+                                    updatePosition(change.position.x)
+                                    change.consume()
+                                }
+                                if (dragStart == null) {
+                                    // 손가락을 끌지 않고 탭한 경우에도 해당 위치로 이동합니다.
+                                    updatePosition(down.position.x)
+                                } else {
+                                    drag(down.id) { change ->
+                                        updatePosition(change.position.x)
+                                        change.consume()
+                                    }
+                                }
+                                val target = dragPosition.coerceIn(0L, totalDuration.coerceAtLeast(1L))
+                                if (useVlcFallback) vlcPlayer.seekTo(target) else exoPlayer.seekTo(target)
+                                isDragging = false
+                            }
+                        }
+                ) {
+                    val progress = (displayedPosition.toFloat() / totalDuration.coerceAtLeast(1L))
+                        .coerceIn(0f, 1f)
+                    val progressTrackWidth = (maxWidth - 16.dp).coerceAtLeast(14.dp)
+                    val thumbOffset = ((progressTrackWidth - 14.dp) * progress)
+                        .coerceIn(0.dp, progressTrackWidth - 14.dp)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(androidx.compose.ui.Alignment.TopCenter),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = formatCompactPipTime(displayedPosition, totalDuration),
+                            color = Color.White,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Start
+                        )
+                        Text(
+                            text = formatCompactPipTime(totalDuration, totalDuration),
+                            color = Color.White.copy(alpha = 0.82f),
+                            fontSize = 20.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.End
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .width(progressTrackWidth)
+                            .height(14.dp)
+                            .align(androidx.compose.ui.Alignment.BottomCenter)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .align(androidx.compose.ui.Alignment.Center)
+                                .clip(androidx.compose.foundation.shape.RoundedCornerShape(4.dp))
+                                .background(Color.White.copy(alpha = 0.42f))
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(progress)
+                                    .background(PrimaryColor)
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .align(androidx.compose.ui.Alignment.CenterStart)
+                                .offset(x = thumbOffset)
+                                .size(14.dp)
+                                .border(
+                                    width = 2.dp,
+                                    color = Color.White,
+                                    shape = androidx.compose.foundation.shape.CircleShape
+                                )
+                                .background(
+                                    PrimaryColor,
+                                    shape = androidx.compose.foundation.shape.CircleShape
+                                )
+                        )
+                    }
+                }
+
+                if (!isInPipMode) Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    PipControlButton(
+                        modifier = Modifier.weight(1f),
+                        label = "↶ ${seekTime}s",
+                        actionLabel = "${seekTime}초 되감기",
+                        onClick = { executeButton(1) }
+                    )
+                    PipControlButton(
+                        modifier = Modifier.weight(1f),
+                        label = if (isPlaying) "Ⅱ" else "▶",
+                        actionLabel = if (isPlaying) "일시정지" else "재생",
+                        onClick = { executeButton(2) }
+                    )
+                    PipControlButton(
+                        modifier = Modifier.weight(1f),
+                        label = "${seekTime}s ↷",
+                        actionLabel = "${seekTime}초 빨리감기",
+                        onClick = { executeButton(3) }
+                    )
+                }
             }
         }
 
@@ -5636,6 +6099,38 @@ fun VideoPlayerScreen(
         }
     }
     } // End of CompositionLocalProvider
+
+    if (showFloatingPlayerPermissionDialog) {
+        AlertDialog(
+            onDismissRequest = { showFloatingPlayerPermissionDialog = false },
+            title = { Text("플로팅 플레이어 권한 안내") },
+            text = {
+                Text(
+                    "다른 앱 위에 동영상을 띄우고 진행 막대를 직접 드래그해 탐색하려면 ‘다른 앱 위에 표시’ 권한이 필요합니다. " +
+                        "권한은 이 기능을 선택했을 때만 요청됩니다. 허용하지 않아도 시스템 PiP로 시청할 수 있지만, 시스템 PiP에서는 진행 막대 드래그가 지원되지 않습니다."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showFloatingPlayerPermissionDialog = false
+                    val videoSize = videoSizeState
+                    mainActivity?.openFloatingPlayerPermissionSettings(
+                        useVlc = useVlcFallback,
+                        title = title,
+                        seekSeconds = seekTime,
+                        videoWidth = videoSize?.width?.takeIf { it > 0 } ?: 16,
+                        videoHeight = videoSize?.height?.takeIf { it > 0 } ?: 9
+                    )
+                }) { Text("권한 설정") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showFloatingPlayerPermissionDialog = false
+                    mainActivity?.enterPipMode()
+                }) { Text("시스템 PiP 사용") }
+            }
+        )
+    }
 
     // ── 렌더러 선택 다이얼로그 ──────────────────────────────────────
     if (showRendererDialog) {
@@ -7024,6 +7519,20 @@ fun formatSrtTime(ms: Long): String {
     val s = (ms % 60000) / 1000
     val msRem = ms % 1000
     return String.format(java.util.Locale.US, "%02d:%02d:%02d,%03d", h, m, s, msRem)
+}
+
+fun formatCompactPipTime(ms: Long, totalMs: Long): String {
+    val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
+    val totalDurationSeconds = (totalMs / 1000L).coerceAtLeast(0L)
+    val s = totalSeconds % 60
+    val m = (totalSeconds / 60) % 60
+    val h = totalSeconds / 3600
+    val totalH = totalDurationSeconds / 3600
+    return if (totalH > 0 || h > 0) {
+        String.format(java.util.Locale.US, "%d:%02d:%02d", h, m, s)
+    } else {
+        String.format(java.util.Locale.US, "%02d:%02d", m, s)
+    }
 }
 
 /** The sync controls intentionally use reversed +/- behavior: plus advances, minus delays. */
@@ -9501,6 +10010,7 @@ fun VlcSubtitleOverlay(
     subtitleScale: Float,
     subtitleOffsetMs: Long = 0L,
     isControlVisible: Boolean = false,
+    isInPipMode: Boolean = false,
     modifier: androidx.compose.ui.Modifier = androidx.compose.ui.Modifier
 ) {
     var subtitleCues by androidx.compose.runtime.remember(subtitleUrl) { 
@@ -9565,7 +10075,7 @@ fun VlcSubtitleOverlay(
     }
     
     if (currentText.isNotEmpty()) {
-        val targetBottomPadding = if (isControlVisible) 180.dp else 64.dp
+        val targetBottomPadding = if (isInPipMode) 16.dp else if (isControlVisible) 180.dp else 64.dp
         val bottomPadding = androidx.compose.animation.core.animateDpAsState(
             targetValue = targetBottomPadding,
             animationSpec = androidx.compose.animation.core.tween(durationMillis = 300)
@@ -9581,10 +10091,11 @@ fun VlcSubtitleOverlay(
                     .fillMaxWidth(0.85f)
                     .wrapContentWidth(androidx.compose.ui.Alignment.CenterHorizontally)
             ) {
+                val pipScaleMultiplier = if (isInPipMode) 2.0f else 1.0f
                 androidx.compose.material3.Text(
                     text = currentText,
                     color = androidx.compose.ui.graphics.Color.White,
-                    fontSize = (20 * subtitleScale).sp,
+                    fontSize = (20 * subtitleScale * pipScaleMultiplier).sp,
                     lineHeight = 1.4.em,
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,

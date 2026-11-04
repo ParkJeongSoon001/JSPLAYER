@@ -50,6 +50,16 @@
 # MSAL (OneDrive) keep rules
 -keep class com.microsoft.identity.** { *; }
 
+# Google Drive API uses reflection to instantiate JSON error and response models.
+# Keep the error model (including nested details classes) and generated Drive models
+# intact so R8 cannot remove/rename their no-arg constructors or @Key-backed fields.
+-keep class com.google.api.client.googleapis.json.GoogleJsonError { *; }
+-keep class com.google.api.client.googleapis.json.GoogleJsonError$* { *; }
+-keep class com.google.api.services.drive.model.** { *; }
+-keepclassmembers class * {
+    @com.google.api.client.util.Key <fields>;
+}
+
 # OkHttp & Coroutines keep rules
 -dontwarn okhttp3.**
 -dontwarn org.xmlpull.v1.**
