@@ -174,6 +174,100 @@ data class PlaylistItem(
     val isAudio: Boolean = false
 )
 
+private data class NumberedVideoFileName(
+    val prefix: String,
+    val digits: String,
+    val suffix: String,
+    val extension: String
+)
+
+private data class NumberedVideoMatch(
+    val index: Int,
+    val expectedFileName: String
+)
+
+private val numberedVideoDigitsRegex = Regex("\\d+")
+private val bracketedFileTagRegex = Regex("""\[[^\]]*\]""")
+
+private fun parseNumberedVideoFileNames(
+    value: String,
+    fallbackExtension: String? = null
+): List<NumberedVideoFileName> {
+    val fileName = value.trim()
+        .substringBefore('?')
+        .substringBefore('#')
+        .substringAfterLast('/')
+        .substringAfterLast('\\')
+        .let { android.net.Uri.decode(it) }
+    val extensionStart = fileName.lastIndexOf('.')
+    val hasFileExtension = extensionStart > 0 && extensionStart < fileName.lastIndex
+    val extension = if (hasFileExtension) fileName.substring(extensionStart) else fallbackExtension ?: return emptyList()
+
+    // Bracketed tags can differ between adjacent episodes (for example [afdaf] vs [fdsafds]).
+    val stem = (if (hasFileExtension) fileName.substring(0, extensionStart) else fileName)
+        .replace(bracketedFileTagRegex, "")
+        .trim()
+    return numberedVideoDigitsRegex.findAll(stem).map { match ->
+        NumberedVideoFileName(
+            prefix = stem.substring(0, match.range.first),
+            digits = match.value,
+            suffix = stem.substring(match.range.last + 1),
+            extension = extension
+        )
+    }.toList()
+}
+
+private fun numberedVideoFileNamesFor(title: String, videoUrl: String): List<NumberedVideoFileName> {
+    val urlPath = android.net.Uri.parse(videoUrl).path.orEmpty()
+    val urlFileName = urlPath.substringAfterLast('/')
+    val urlExtensionStart = urlFileName.lastIndexOf('.')
+    val urlExtension = if (urlExtensionStart > 0 && urlExtensionStart < urlFileName.lastIndex) {
+        urlFileName.substring(urlExtensionStart)
+    } else {
+        null
+    }
+
+    val fromTitle = parseNumberedVideoFileNames(title, urlExtension)
+    if (fromTitle.isNotEmpty()) return fromTitle
+
+    // DLNA playback URLs use server-side numeric IDs (for example /v/NDLNA/133.mkv),
+    // which are not the original filename sequence and must not be incremented.
+    if (urlPath.contains("/v/NDLNA/", ignoreCase = true)) return emptyList()
+    return parseNumberedVideoFileNames(videoUrl)
+}
+
+private fun findNextNumberedVideo(
+    currentTitle: String,
+    currentUrl: String,
+    playlist: List<PlaylistItem>
+): NumberedVideoMatch? {
+    val currentNames = numberedVideoFileNamesFor(currentTitle, currentUrl).asReversed()
+    if (currentNames.isEmpty()) return null
+
+    val playlistNames = playlist.mapIndexed { index, item ->
+        val names = numberedVideoFileNamesFor(item.title, item.videoUrl)
+        index to names
+    }
+
+    for (currentName in currentNames) {
+        val currentNumber = currentName.digits.toLongOrNull() ?: continue
+        if (currentNumber == Long.MAX_VALUE) continue
+        val nextDigits = (currentNumber + 1L).toString().padStart(currentName.digits.length, '0')
+        val expectedFileName = currentName.prefix + nextDigits + currentName.suffix + currentName.extension
+
+        val match = playlistNames.firstOrNull { (index, itemNames) ->
+            !playlist[index].isAudio && itemNames.any { itemName ->
+                itemName.prefix.equals(currentName.prefix, ignoreCase = true) &&
+                    itemName.suffix.equals(currentName.suffix, ignoreCase = true) &&
+                    itemName.extension.equals(currentName.extension, ignoreCase = true) &&
+                    itemName.digits == nextDigits
+            }
+        }
+        if (match != null) return NumberedVideoMatch(match.first, expectedFileName)
+    }
+    return null
+}
+
 class MainActivity : ComponentActivity() {
     private val devices = mutableStateListOf<Device<*, *, *>>()
     private lateinit var dlnaManager: DLNAManager
@@ -1768,8 +1862,7 @@ class MainActivity : ComponentActivity() {
                                     playlist = state.playlist,
                                     currentIndex = state.currentIndex,
                                     ftpEncoding = state.ftpEncoding,
-                                    onPlayNext = { nextItem ->
-                                        val nextIndex = state.currentIndex + 1
+                                    onPlayNext = { nextItem, nextIndex ->
                                         android.util.Log.d("AutoPlay", "Playing next: ${nextItem.title} (index=$nextIndex)")
                                         android.util.Log.d("AutoPlay", "  subtitleUrl=${nextItem.subtitleUrl}")
                                         android.util.Log.d("AutoPlay", "  subtitleExt=${nextItem.subtitleExtension}")
@@ -1780,7 +1873,9 @@ class MainActivity : ComponentActivity() {
                                             subtitleExtension = nextItem.subtitleExtension,
                                             playlist = state.playlist,
                                             currentIndex = nextIndex,
-                                            ftpEncoding = state.ftpEncoding
+                                            ftpEncoding = state.ftpEncoding,
+                                            httpHeaders = state.httpHeaders,
+                                            isAudio = nextItem.isAudio
                                         )
                                     },
                                     onPlayPrevious = { prevItem ->
@@ -1793,7 +1888,9 @@ class MainActivity : ComponentActivity() {
                                             subtitleExtension = prevItem.subtitleExtension,
                                             playlist = state.playlist,
                                             currentIndex = prevIndex,
-                                            ftpEncoding = state.ftpEncoding
+                                            ftpEncoding = state.ftpEncoding,
+                                            httpHeaders = state.httpHeaders,
+                                            isAudio = prevItem.isAudio
                                         )
                                     },
                                     // ── 캐스팅 콜백 ──
@@ -3015,7 +3112,7 @@ fun VideoPlayerScreen(
     currentIndex: Int = -1,
     ftpEncoding: String = "AUTO",
     httpHeaders: Map<String, String> = emptyMap(),
-    onPlayNext: ((PlaylistItem) -> Unit)? = null,
+    onPlayNext: ((PlaylistItem, Int) -> Unit)? = null,
     onPlayPrevious: ((PlaylistItem) -> Unit)? = null,
     // ── 캐스팅 관련 파라미터 ──
     rendererDevices: List<Device<*, *, *>> = emptyList(),
@@ -3054,6 +3151,7 @@ fun VideoPlayerScreen(
     
     // 재생이 실제로 시작되었는지 추적 (한번 플레이된 후 멈췄을 때만 자동 종료)
     var hasStartedPlaying by remember { mutableStateOf(false) }
+    var hasHandledPlaybackEnd by remember(videoUrl) { mutableStateOf(false) }
 
     LaunchedEffect(castPreparationInProgress, castPreparationStartedAt) {
         if (!castPreparationInProgress) return@LaunchedEffect
@@ -4405,22 +4503,37 @@ fun VideoPlayerScreen(
         }
     }
 
+    fun handlePlaybackEnded() {
+        if (hasHandledPlaybackEnd) return
+        hasHandledPlaybackEnd = true
+        PlaybackPositionStore.removePosition(context, videoUrl)
+        android.util.Log.d("VideoPlayerScreen", "Playback ended for: $videoUrl")
+
+        val nextMatch = if (isAudio) null else findNextNumberedVideo(title, videoUrl, playlist)
+        val nextItem = nextMatch?.let { playlist.getOrNull(it.index) }
+        if (nextItem != null && !nextItem.isAudio && onPlayNext != null) {
+            android.util.Log.d(
+                "VideoPlayerScreen",
+                "Auto-playing numbered next: expected=${nextMatch.expectedFileName}, found=${nextItem.title}, index=${nextMatch.index}"
+            )
+            onPlayNext.invoke(nextItem, nextMatch.index)
+        } else {
+            android.util.Log.d(
+                "VideoPlayerScreen",
+                "No consecutive numbered video; returning to list. title='$title', url='$videoUrl', " +
+                    "playlistSize=${playlist.size}, candidates=${playlist.take(20).joinToString { it.title }}"
+            )
+            onClose()
+        }
+    }
+
     // 자동 다음 재생 리스너
-    DisposableEffect(exoPlayer) {
+    DisposableEffect(exoPlayer, vlcPlayer, videoUrl, title, playlist, currentIndex, onPlayNext, onClose) {
+        vlcPlayer.onPlaybackEnded = { handlePlaybackEnded() }
         val listener = object : androidx.media3.common.Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == androidx.media3.common.Player.STATE_ENDED) {
-                    // 재생 완료 → 저장 위치 삭제
-                    PlaybackPositionStore.removePosition(context, videoUrl)
-                    android.util.Log.d("VideoPlayerScreen", "Playback ended for: $videoUrl")
-                    
-                    // 다음 파일 자동 재생 
-                    if (playlist.isNotEmpty() && currentIndex >= 0 && currentIndex < playlist.size - 1) {
-                        val nextIndex = currentIndex + 1
-                        val nextItem = playlist[nextIndex]
-                        android.util.Log.d("VideoPlayerScreen", "Auto-playing next: ${nextItem.title} (index=$nextIndex)")
-                        onPlayNext?.invoke(nextItem)
-                    }
+                    handlePlaybackEnded()
                 }
             }
 
@@ -4520,7 +4633,10 @@ fun VideoPlayerScreen(
             }
         }
         exoPlayer.addListener(listener)
-        onDispose { exoPlayer.removeListener(listener) }
+        onDispose {
+            exoPlayer.removeListener(listener)
+            vlcPlayer.onPlaybackEnded = null
+        }
     }
 
     DisposableEffect(Unit) { onDispose {
@@ -4639,7 +4755,7 @@ fun VideoPlayerScreen(
                 if (hasNext) {
                     val nextItem = playlist[currentIndex + 1]
                     android.util.Log.d("AutoPlay", "Manual next: ${nextItem.title} (index=${currentIndex + 1})")
-                    onPlayNext?.invoke(nextItem)
+                    onPlayNext?.invoke(nextItem, currentIndex + 1)
                     return
                 }
             }
